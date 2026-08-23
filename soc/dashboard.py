@@ -240,7 +240,31 @@ def _reset_test_state() -> dict:
 
     _ensure_core_services()
     cleared = _clear_jsonl_logs()
-    return {"active_victim": "victim-vuln", "cleared": cleared}
+
+    # Reset rules and WAF to initial disabled baseline (zero-alert state)
+    rules = _read_rules()
+    rules["enabled"] = False
+    _write_rules(rules)
+
+    waf_policy = {
+        "enabled": False,
+        "min_requests_window": int(rules.get("min_events_per_ip", 15)),
+        "max_fail_rate": float(rules.get("high_fail_rate_threshold", 0.80)),
+        "max_consecutive_errors": int(rules.get("block_probing_min_consecutive_errors", 12)),
+        "window_seconds": 60,
+        "action": "429_too_many_requests",
+    }
+    waf_policy_path = os.path.join(LAB_ROOT, "control", "waf_policy.json")
+    try:
+        with open(waf_policy_path, "w", encoding="utf-8") as f:
+            json.dump(waf_policy, f, indent=2)
+    except Exception:
+        pass
+
+    _call_victim_waf("/waf/reset", method="POST")
+    _call_victim_waf("/waf/policy", method="POST", json_data={"enabled": False})
+
+    return {"active_victim": "victim-vuln", "cleared": cleared, "waf_reset": True}
 
 
 def _stop_attack_related_workloads() -> None:
@@ -1401,10 +1425,20 @@ MAIN_PAGE = r"""<!doctype html>
 
     <!-- ══ SIDEBAR ══ -->
     <nav class="sidebar">
-      <div class="sidebar-section">Viste Analisi</div>
+      <div class="sidebar-section">Laboratorio &amp; Controllo</div>
       <a class="nav-item active" data-panel="network" onclick="showPanel('network',this)">
-        <span class="nav-icon">🌐</span> Network
+        <span class="nav-icon">🌐</span> Topologia &amp; Attack Demo
       </a>
+
+      <div class="sidebar-section" style="margin-top:12px">Esperienza SOC &amp; Difesa</div>
+      <a class="nav-item" data-panel="hunting" onclick="showPanel('hunting',this)">
+        <span class="nav-icon">🎯</span> 1. Threat Hunting &amp; SIEM
+      </a>
+      <a class="nav-item" data-panel="alerts" onclick="showPanel('alerts',this)">
+        <span class="nav-icon">🚨</span> 2. Alert SOC &amp; WAF Triage
+      </a>
+
+      <div class="sidebar-section" style="margin-top:12px">Esplorazione Telemetrica</div>
       <a class="nav-item" data-panel="log-soc" onclick="showPanel('log-soc',this)">
         <span class="nav-icon">📊</span> Log SOC
       </a>
@@ -1414,14 +1448,8 @@ MAIN_PAGE = r"""<!doctype html>
       <a class="nav-item" data-panel="attack-detail" onclick="showPanel('attack-detail',this)">
         <span class="nav-icon">🔬</span> Attack Detail
       </a>
-      <a class="nav-item" data-panel="alerts" onclick="showPanel('alerts',this)">
-        <span class="nav-icon">🚨</span> Alert SOC
-      </a>
-      <a class="nav-item" data-panel="hunting" onclick="showPanel('hunting',this)">
-        <span class="nav-icon">🎯</span> Threat Hunting & WAF
-      </a>
       <a class="nav-item" data-panel="docker" onclick="showPanel('docker',this)">
-        <span class="nav-icon">🐳</span> Docker Lab
+        <span class="nav-icon">🐳</span> Gestione Docker
       </a>
 
       <div class="sidebar-spacer"></div>
@@ -3108,18 +3136,33 @@ function renderAlerts(alerts, kpis, rules) {
   let alertCardsHtml = '';
 
   if (!alerts.length) {
-    alertCardsHtml = `
-      <div style="padding:16px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:8px;display:flex;align-items:center;gap:10px">
-        <span style="font-size:20px">🛡️</span>
-        <div>
-          <strong style="color:var(--green);font-size:13px">Nessuna violazione di sicurezza o anomalia crittografica attiva.</strong>
-          <div style="font-size:12px;color:var(--text-muted);margin-top:2px">Il traffico dei client benigni rispetta la baseline normale di latenza ed error-rate.</div>
-        </div>
-      </div>`;
+    if (rules && !rules.enabled) {
+      alertCardsHtml = `
+        <div style="padding:20px;background:rgba(99,102,241,0.08);border:1px solid rgba(99,102,241,0.3);border-radius:8px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:26px">🛡️</span>
+            <div>
+              <strong style="color:#a5b4fc;font-size:14px">Zero Allarmi Attivi · Regole SOC &amp; WAF Iniziali Disattive</strong>
+              <div style="font-size:12px;color:var(--text-muted);margin-top:4px">Nessuna regola di blocco è ancora attiva (zero spoiler). Apri il <strong>Threat Hunting Studio</strong> per analizzare i log grezzi con query SIEM e distribuire la tua regola di difesa.</div>
+            </div>
+          </div>
+          <button class="btn btn-primary" style="font-size:12px" onclick="showPanel('hunting', document.querySelector('[data-panel=hunting]'))">🎯 Vai a Threat Hunting &amp; SIEM</button>
+        </div>`;
+    } else {
+      alertCardsHtml = `
+        <div style="padding:16px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.25);border-radius:8px;display:flex;align-items:center;gap:12px">
+          <span style="font-size:24px">🟢</span>
+          <div>
+            <strong style="color:var(--green);font-size:13px">Regole di Difesa Attive · Nessuna Violazione Rilevata</strong>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:2px">Il traffico dei client benigni rispetta pienamente le soglie consentite di errore e latenza.</div>
+          </div>
+        </div>`;
+    }
   } else {
     alertCardsHtml = alerts.map(a => {
-      const sev = a.severity || 'high';
-      const sevClass = `sev-${sev}`;
+      const isWaf = a.rule === 'waf_padding_oracle_blocked';
+      const sev = a.severity || (isWaf ? 'critical' : 'high');
+      const sevClass = isWaf ? 'sev-critical' : `sev-${sev}`;
       const confPercent = Math.round((a.confidence || 0.9) * 100);
       const ev = a.evidence || {};
       
@@ -3127,6 +3170,8 @@ function renderAlerts(alerts, kpis, rules) {
       if (ev.total_requests !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Richieste Totali</span><span class="evidence-v">${ev.total_requests}</span></div>`;
       if (ev.failed_requests !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Errori / 500</span><span class="evidence-v">${ev.failed_requests}</span></div>`;
       if (ev.fail_rate !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Fail Rate</span><span class="evidence-v">${(ev.fail_rate * 100).toFixed(1)}%</span></div>`;
+      if (ev.blocked_requests !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Richieste Bloccate WAF</span><span class="evidence-v" style="color:#c084fc;font-weight:700">${ev.blocked_requests} (HTTP 429)</span></div>`;
+      if (ev.action !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Azione Inline</span><span class="evidence-v" style="color:var(--green)">${escapeHtml(ev.action)}</span></div>`;
       if (ev.latency_stddev_ms !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">StdDev Latenza</span><span class="evidence-v">${ev.latency_stddev_ms} ms</span></div>`;
       if (ev.p95_p50_diff_ms !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Spread p95-p50</span><span class="evidence-v">${ev.p95_p50_diff_ms} ms</span></div>`;
       if (ev.bimodality_coefficient !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Sarle BC (Bimodale)</span><span class="evidence-v" style="color:${ev.is_bimodal ? 'var(--amber)' : 'inherit'}">${ev.bimodality_coefficient} ${ev.is_bimodal ? '⚠️ (Bimodale)' : ''}</span></div>`;
@@ -3134,11 +3179,13 @@ function renderAlerts(alerts, kpis, rules) {
       if (ev.block_aligned !== undefined) evHtml += `<div class="evidence-item"><span class="evidence-k">Allineamento CBC</span><span class="evidence-v">${ev.block_aligned ? '16B OK' : 'No'}</span></div>`;
       evHtml += '</div>';
 
+      const cardStyle = isWaf ? 'border:1px solid rgba(168,85,247,0.5);background:rgba(168,85,247,0.06)' : '';
+
       return `
-        <div class="alert-card ${sevClass}">
+        <div class="alert-card ${sevClass}" style="${cardStyle}">
           <div class="alert-header">
             <div style="display:flex;align-items:center;gap:8px">
-              <span class="alert-sev ${sevClass}">${sev}</span>
+              <span class="alert-sev ${sevClass}">${isWaf ? '🛡️ WAF MITIGATION' : sev}</span>
               <strong style="color:#fff;font-size:14px">${escapeHtml(a.title || a.rule)}</strong>
               ${a.mitre_technique ? `<span class="mitre-tag">${escapeHtml(a.mitre_technique)}</span>` : ''}
             </div>
@@ -3146,6 +3193,7 @@ function renderAlerts(alerts, kpis, rules) {
           </div>
           <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">
             Actor IP: <strong style="color:var(--text)">${escapeHtml(a.ip)}</strong> · Confidenza Correlazione: <strong style="color:var(--green)">${confPercent}%</strong>
+            ${isWaf ? ' · <span style="color:#c084fc;font-weight:700">🛡️ ATTACCO NEUTRALIZZATO - SEGRETO PROTETTO</span>' : ''}
           </div>
           ${evHtml}
           <div style="margin-top:10px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
