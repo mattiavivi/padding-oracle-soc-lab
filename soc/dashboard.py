@@ -3075,10 +3075,10 @@ async function loadAttackDetail(targetId) {
 
       let completeEv = null;
       let blockedEv = null;
+      let errEv = null;
       let totalProbes = 0;
       let lastProbe = null;
       let numBlocks = 1;
-
 
       atk.forEach(ev => {
         if (ev.event_type === 'attack_probe') {
@@ -3101,6 +3101,9 @@ async function loadAttackDetail(targetId) {
         if (ev.event_type === 'attack_blocked') {
           blockedEv = ev;
         }
+        if (ev.event_type === 'attack_error') {
+          errEv = ev;
+        }
       });
 
       let html = '';
@@ -3109,8 +3112,8 @@ async function loadAttackDetail(targetId) {
       const totalExpectedBytes = numBlocks * 16;
       const recCount = completeEv ? totalExpectedBytes : Object.keys(persistentAttackByteMap).length;
 
-      const statusLabel = blockedEv ? '🛑 BLOCCATO DA WAF' : (completeEv ? '✅ COMPLETATO' : '⚡ IN ESECUZIONE');
-      const statusColor = blockedEv ? 'var(--red)' : (completeEv ? 'var(--green)' : 'var(--accent)');
+      const statusLabel = blockedEv ? '🛑 BLOCCATO DA WAF' : (errEv ? '⚠️ ATTACCO INTERROTTO' : (completeEv ? '✅ COMPLETATO' : '⚡ IN ESECUZIONE'));
+      const statusColor = blockedEv ? 'var(--red)' : (errEv ? 'var(--amber)' : (completeEv ? 'var(--green)' : 'var(--accent)'));
 
       // Stats Summary Bar
       html += `
