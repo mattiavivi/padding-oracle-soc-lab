@@ -1,5 +1,6 @@
 import argparse
 import random
+import socket
 import statistics
 import time
 
@@ -7,6 +8,20 @@ import requests
 
 from common.crypto_utils import b64d, b64e, pkcs7_unpad
 from common.event_logger import emit_event
+
+
+def get_local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+LOCAL_IP = get_local_ip()
 
 
 class WafBlockedException(Exception):
@@ -29,7 +44,7 @@ def decrypt_oracle_status(base_url: str, token: bytes) -> tuple[int, float]:
         r = requests.post(
             f"{base_url}/decrypt",
             json={"token": b64e(token)},
-            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker"},
+            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker", "X-Forwarded-For": LOCAL_IP},
             timeout=5,
         )
         latency = (time.perf_counter() - started) * 1000

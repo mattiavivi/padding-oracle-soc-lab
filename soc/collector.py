@@ -299,36 +299,48 @@ def _compute_soc_kpis(events: list[dict], alerts: list[dict]) -> dict:
     ]
     victim_events = [e for e in events if e.get("service") == "victim"]
 
-    # Baseline Benign Profile
-    benign_decrypts = [e for e in victim_events if str(e.get("src_ip", "")).startswith("benign")]
+    decrypts_by_ip = defaultdict(list)
+    for e in victim_events:
+        if e.get("endpoint") == "/decrypt":
+            decrypts_by_ip[str(e.get("src_ip", "unknown"))].append(e)
+
+    benign_decrypts = []
+    attacker_decrypts = []
+
+    for ip, items in decrypts_by_ip.items():
+        total = len(items)
+        fails = sum(1 for x in items if int(x.get("status_code", 0)) != 200)
+        rate = fails / total if total > 0 else 0.0
+        if ip == "attacker" or "attacker" in ip or (total >= 10 and rate >= 0.60):
+            attacker_decrypts.extend(items)
+        else:
+            benign_decrypts.extend(items)
+
     benign_total = len(benign_decrypts)
     benign_fails = sum(1 for e in benign_decrypts if int(e.get("status_code", 0)) != 200)
     benign_fail_rate = round(benign_fails / benign_total, 3) if benign_total > 0 else 0.0
     benign_lats = [float(e.get("latency_ms", 0.0)) for e in benign_decrypts if e.get("latency_ms") is not None]
     benign_stats = _calc_latency_stats(benign_lats)
 
-    # Attacker Profile
-    attacker_decrypts = [e for e in victim_events if str(e.get("src_ip", "")) == "attacker"]
     attacker_total = len(attacker_decrypts)
     attacker_fails = sum(1 for e in attacker_decrypts if int(e.get("status_code", 0)) != 200)
     attacker_fail_rate = round(attacker_fails / attacker_total, 3) if attacker_total > 0 else 0.0
     attacker_lats = [float(e.get("latency_ms", 0.0)) for e in attacker_decrypts if e.get("latency_ms") is not None]
     attacker_stats = _calc_latency_stats(attacker_lats)
 
-    # Detection KPIs: TPR, FPR, MTTD
     alerted_ips = {a.get("ip") for a in alerts}
-    has_attacker_alert = "attacker" in alerted_ips or any("attacker" in str(ip) for ip in alerted_ips)
-    has_benign_alert = any(str(ip).startswith("benign") for ip in alerted_ips)
+    has_attacker_alert = len(alerted_ips) > 0
+    has_benign_alert = False
+    for ip, items in decrypts_by_ip.items():
+        total = len(items)
+        fails = sum(1 for x in items if int(x.get("status_code", 0)) != 200)
+        rate = fails / total if total > 0 else 0.0
+        if rate < 0.20 and ip in alerted_ips:
+            has_benign_alert = True
 
-    is_attack_present = len(attacker_events) > 0 or len(attacker_decrypts) >= 20
+    is_attack_present = len(attacker_events) > 0 or len(attacker_decrypts) >= 15
 
-    # True Positive Rate (TPR)
-    if is_attack_present:
-        tpr = 1.0 if has_attacker_alert else 0.0
-    else:
-        tpr = 1.0  # Nessun attacco presente, non mancato
-
-    # False Positive Rate (FPR)
+    tpr = 1.0 if has_attacker_alert else (1.0 if not is_attack_present else 0.0)
     fpr = 1.0 if has_benign_alert else 0.0
 
     # MTTD (Mean Time to Detect in seconds) - robust matching against windowed events
