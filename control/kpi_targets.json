@@ -1,0 +1,12 @@
+{
+  "crypto": {
+    "attack_success_on_vuln": true,
+    "attack_failure_on_fixed": true,
+    "max_avg_queries_per_byte_demo": 220
+  },
+  "soc": {
+    "max_detection_delay_seconds": 15,
+    "min_true_positive_rate": 0.9,
+    "max_false_positive_rate": 0.1
+  }
+}

@@ -1,0 +1,9 @@
+•  ./control/scenario.sh up-vuln 
+•  ./control/scenario.sh up-partial 
+•  ./control/scenario.sh up-fixed 
+•  ./control/scenario.sh start-benign 
+•  ./control/scenario.sh run-attack 
+•  ./control/scenario.sh status 
+•  ./control/scenario.sh down 
+1.  ./control/scenario.sh clean-all 
+2.  ./control/scenario.sh rebuild-all 

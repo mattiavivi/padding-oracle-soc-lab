@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "min_requests_window": 15,
+  "max_fail_rate": 0.8,
+  "max_consecutive_errors": 15,
+  "window_seconds": 60,
+  "action": "429_too_many_requests"
+}

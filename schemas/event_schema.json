@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SOC Lab Event",
+  "type": "object",
+  "required": [
+    "ts",
+    "service",
+    "event_type",
+    "scenario_id",
+    "src_ip",
+    "endpoint",
+    "status_code",
+    "latency_ms"
+  ],
+  "properties": {
+    "ts": { "type": "string" },
+    "service": { "type": "string" },
+    "event_type": { "type": "string" },
+    "scenario_id": { "type": "string" },
+    "src_ip": { "type": "string" },
+    "endpoint": { "type": "string" },
+    "status_code": { "type": "integer" },
+    "latency_ms": { "type": "number" },
+    "ciphertext_len": { "type": "integer" },
+    "error_type": { "type": "string" },
+    "mode": { "type": "string" },
+    "details": { "type": "object" }
+  }
+}

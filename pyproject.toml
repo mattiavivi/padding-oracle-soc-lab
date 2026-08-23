@@ -1,0 +1,14 @@
+[project]
+name = "padding-oracle-soc-lab"
+version = "0.1.0"
+description = "Containerized AES-CBC Padding Oracle lab with SOC telemetry"
+requires-python = ">=3.11"
+dependencies = [
+  "flask>=3.0.0",
+  "pycryptodome>=3.20.0",
+  "requests>=2.32.0",
+  "docker>=7.1.0",
+]
+
+[tool.uv]
+dev-dependencies = []

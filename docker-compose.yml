@@ -1,0 +1,129 @@
+services:
+  victim-vuln:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: victim-vuln
+    command: python victim/app.py
+    environment:
+      VICTIM_MODE: vuln
+      SCENARIO_ID: vuln
+      LOG_DIR: /logs
+    volumes:
+      - .:/app
+      - ./runtime-logs:/logs
+    ports:
+      - "18080:8080"
+
+  victim-partial:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: victim-partial
+    command: python victim/app.py
+    environment:
+      VICTIM_MODE: partial
+      SCENARIO_ID: partial
+      LOG_DIR: /logs
+    volumes:
+      - .:/app
+      - ./runtime-logs:/logs
+    ports:
+      - "18081:8080"
+
+  victim-fixed:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: victim-fixed
+    command: python victim/app.py
+    environment:
+      VICTIM_MODE: fixed
+      SCENARIO_ID: fixed
+      LOG_DIR: /logs
+    volumes:
+      - .:/app
+      - ./runtime-logs:/logs
+    ports:
+      - "18082:8080"
+
+  attacker:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: attacker
+    command: sleep infinity
+    environment:
+      LOG_DIR: /logs
+    volumes:
+      - .:/app
+      - ./runtime-logs:/logs
+    depends_on:
+      - victim-vuln
+
+  benign-1:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: benign-1
+    command: sleep infinity
+    environment:
+      LOG_DIR: /logs
+    volumes:
+      - .:/app
+      - ./runtime-logs:/logs
+    depends_on:
+      - victim-vuln
+
+  benign-2:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: benign-2
+    command: sleep infinity
+    environment:
+      LOG_DIR: /logs
+    volumes:
+      - .:/app
+      - ./runtime-logs:/logs
+    depends_on:
+      - victim-vuln
+
+  soc:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: soc
+    command: python soc/collector.py
+    environment:
+      LOG_DIR: /logs
+      SOC_WINDOW_MINUTES: 15
+    volumes:
+      - .:/app
+      - ./runtime-logs:/logs
+    ports:
+      - "18090:8090"
+    restart: unless-stopped
+
+  soc-ui:
+    build: .
+    image: padding-oracle-soc-lab-base
+    pull_policy: build
+    container_name: soc-ui
+    command: python soc/dashboard.py
+    environment:
+      LAB_ROOT: /home/sysadmin/test/padding-oracle-soc-lab
+      LOG_DIR: /home/sysadmin/test/padding-oracle-soc-lab/runtime-logs
+      ALERT_RULES_FILE: /home/sysadmin/test/padding-oracle-soc-lab/control/alert_rules.json
+      LAB_NETWORK: padding-oracle-soc-lab_default
+      UI_PORT: "8091"
+    volumes:
+      - .:/app
+      - /home/sysadmin/test/padding-oracle-soc-lab:/home/sysadmin/test/padding-oracle-soc-lab
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./runtime-logs:/logs
+    ports:
+      - "18091:8091"
+    depends_on:
+      - soc
+    restart: unless-stopped
