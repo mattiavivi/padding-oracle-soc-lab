@@ -371,11 +371,31 @@ def _compute_soc_kpis(events: list[dict], alerts: list[dict]) -> dict:
         except Exception:
             mttd_seconds = None
 
+    ip_table = []
+    for ip, items in decrypts_by_ip.items():
+        total = len(items)
+        fails = sum(1 for x in items if int(x.get("status_code", 0)) != 200)
+        rate = round(fails / total, 3) if total > 0 else 0.0
+        lats = [float(x.get("latency_ms", 0.0)) for x in items if x.get("latency_ms") is not None]
+        stats = _calc_latency_stats(lats)
+        is_alerted = ip in alerted_ips
+        ip_table.append({
+            "ip": ip,
+            "requests": total,
+            "failed_requests": fails,
+            "fail_rate": rate,
+            "latency_p50_ms": stats.get("p50", 0.0),
+            "latency_stddev_ms": stats.get("stddev", 0.0),
+            "is_alerted": is_alerted,
+            "evaluation": "Violazione Rilevata (Exploit)" if is_alerted else "Conforme alla Baseline",
+        })
+
     return {
-        "is_attack_active": is_attack_present,
         "true_positive_rate": tpr,
         "false_positive_rate": fpr,
         "mttd_seconds": mttd_seconds,
+        "is_attack_active": is_attack_present,
+        "ip_telemetry_table": ip_table,
         "baseline_profile": {
             "benign_requests": benign_total,
             "benign_fail_rate": benign_fail_rate,
@@ -395,9 +415,28 @@ def _compute_soc_kpis(events: list[dict], alerts: list[dict]) -> dict:
     }
 
 
-def _generate_sigma_rule(rules: dict) -> str:
+def _generate_sigma_rule(rules: dict, query_str: str = "") -> str:
     rule_id = uuid.uuid4().hex[:8]
     date_str = datetime.now(timezone.utc).strftime('%Y/%m/%d')
+    endpoint = "/decrypt"
+    status_filter = 500
+    if query_str:
+        if "endpoint" in query_str:
+            for part in query_str.split("AND"):
+                if "endpoint" in part and "=" in part:
+                    endpoint = part.split("=")[-1].strip().strip('"').strip("'")
+        if "status" in query_str:
+            for part in query_str.split("AND"):
+                if "status" in part and "=" in part:
+                    try:
+                        status_filter = int(part.split("=")[-1].strip())
+                    except ValueError:
+                        pass
+
+    min_events = rules.get('min_events_per_ip', 15)
+    fail_rate = rules.get('high_fail_rate_threshold', 0.80)
+    timing_std = rules.get('timing_stddev_threshold_ms', 6.0)
+
     return f"""title: AES-CBC Cryptographic Padding Oracle & Side-Channel Exploit
 id: {rule_id}-cbc-oracle-detect
 status: production
@@ -415,22 +454,22 @@ tags:
   - attack.reconnaissance
   - attack.t1595.002
 logsource:
-  category: application
-  product: padding_oracle_victim
+  category: webserver
+  service: victim
 detection:
   selection_endpoint:
-    endpoint: '/decrypt'
-  selection_failures:
+    endpoint:
+      - '{endpoint}'
+  selection_status:
     status_code:
-      - 400
-      - 403
-      - 500
+      - {status_filter}
+  timeframe: 60s
   condition_error_rate:
-    selection_endpoint and count() >= {rules.get('min_events_per_ip', 15)} by src_ip
-    and failure_rate >= {rules.get('high_fail_rate_threshold', 0.80)}
+    selection_endpoint and selection_status and count() >= {min_events} by src_ip
+    and failure_rate >= {fail_rate}
   condition_timing_leakage:
     selection_endpoint and count() >= {rules.get('min_timing_events_per_ip', 20)} by src_ip
-    and (latency_stddev >= {rules.get('timing_stddev_threshold_ms', 6.0)} or sarle_bimodality_coefficient >= {rules.get('bimodality_threshold', 0.555)})
+    and latency_stddev >= {timing_std}
   condition: condition_error_rate or condition_timing_leakage
 fields:
   - src_ip
@@ -446,7 +485,6 @@ level: critical
 
 @app.get("/hunting/explore")
 def hunting_explore():
-    """Aggrega i log grezzi per la vista Threat Hunting con profilazione approfondita."""
     rules = _load_rules()
     window_minutes = int(rules.get("collector_window_minutes", WINDOW_MINUTES))
     events = _windowed_events(_read_events(), window_minutes)
@@ -568,7 +606,7 @@ def hunting_backtest():
     tpr = 1.0 if has_attacker_intercepted else (1.0 if not any("attacker" in str(e.get("src_ip","")) for e in decrypt_events) else 0.0)
     fpr = 1.0 if has_benign_intercepted else 0.0
 
-    sigma_rule_yaml = _generate_sigma_rule(candidate_rules)
+    sigma_rule_yaml = _generate_sigma_rule(candidate_rules, query_str=data.get("query", ""))
 
     return jsonify({
         "ok": True,

@@ -1716,45 +1716,29 @@ MAIN_PAGE = r"""<!doctype html>
           </div>
         </div>
 
-        <!-- Telemetry Profile (Benign Baseline vs Attacker) -->
+        <!-- Telemetry Profile (Objective Per-IP Table) -->
         <div class="card" style="margin:0">
-          <div class="panel-title" style="font-size:13px;margin-bottom:10px">📊 Profilo Telemetrico: Baseline Benigna vs Attaccante</div>
-          <table style="width:100%;font-size:12px">
-            <thead>
-              <tr>
-                <th>Parametro Telemetrico</th>
-                <th>Baseline Benigna (benign-1, benign-2)</th>
-                <th>Traffico Sospetto / Attaccante</th>
-                <th>Valutazione SOC</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Richieste <code>/decrypt</code></td>
-                <td id="tele-benign-req">—</td>
-                <td id="tele-atk-req" style="font-weight:700;color:var(--red)">—</td>
-                <td style="color:var(--text-muted)">Volume anomalo su endpoint critico</td>
-              </tr>
-              <tr>
-                <td>Tasso di Errore (Fail Rate)</td>
-                <td id="tele-benign-fail">—</td>
-                <td id="tele-atk-fail" style="font-weight:700;color:var(--red)">—</td>
-                <td style="color:var(--text-muted)">Indice di brute-force byte-by-byte</td>
-              </tr>
-              <tr>
-                <td>Latenza Mediana (p50)</td>
-                <td id="tele-benign-p50">—</td>
-                <td id="tele-atk-spread">—</td>
-                <td style="color:var(--text-muted)">Discrepanza di timing leakage</td>
-              </tr>
-              <tr>
-                <td>Latenza StdDev (Varianza)</td>
-                <td><span style="color:var(--green)">Stabile (&lt; 1.5ms)</span></td>
-                <td id="tele-atk-stddev">—</td>
-                <td style="color:var(--text-muted)">Side-channel per byte valido vs non valido</td>
-              </tr>
-            </tbody>
-          </table>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <div class="panel-title" style="font-size:13px;margin:0">📊 Profilo Telemetrico &amp; Valutazione Nodi per IP (Finestra Corrente)</div>
+            <span style="font-size:11px;color:var(--text-muted)">Valutazione automatica basata sui dati reali del traffico</span>
+          </div>
+          <div style="overflow-x:auto">
+            <table style="width:100%;font-size:12px">
+              <thead>
+                <tr>
+                  <th>Indirizzo IP Sorgente</th>
+                  <th>Richieste Totali</th>
+                  <th>Errori (Fail Rate)</th>
+                  <th>Latenza Mediana (p50)</th>
+                  <th>StdDev Latenza</th>
+                  <th>Valutazione Secondo Regola SOC</th>
+                </tr>
+              </thead>
+              <tbody id="telemetry-ips-tbody">
+                <tr><td colspan="6" style="color:var(--text-muted);text-align:center;padding:12px">Inizializzazione telemetria nodi…</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
 
         <!-- Active Security Alerts Feed -->
@@ -2487,10 +2471,11 @@ function buildLogRow(ev) {
     lastCol = `<span style="color:var(--text-dim)">${err || ep}${clientInfo}${latency ? ' ' + latency : ''}</span>`;
   }
 
+  const srcIpTag = ev.src_ip ? `<span style="font-family:var(--font-mono);font-size:11px;font-weight:700;color:#93c5fd">${escapeHtml(ev.src_ip)}</span>` : `<span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">${escapeHtml(svc)}</span>`;
+
   row.innerHTML = `
     <span style="color:var(--text-dim)">${ts}</span>
-    ${tagHtml(cls)}
-    <span>${escapeHtml(svc)}</span>
+    ${srcIpTag}
     <span style="color:var(--text-muted)">${escapeHtml(etype)}</span>
     <span class="${statusClass(code)}">${code !== '' ? code : '—'}</span>
     ${lastCol}
@@ -3244,25 +3229,32 @@ function renderAlerts(alerts, kpis, rules) {
     }
   }
 
-  // Update Telemetry Profile Table
-  const base = kpis.baseline_profile || {};
-  const atk = kpis.attacker_profile || {};
-
-  const teleBenignReq = document.getElementById('tele-benign-req');
-  const teleAtkReq = document.getElementById('tele-atk-req');
-  const teleBenignFail = document.getElementById('tele-benign-fail');
-  const teleAtkFail = document.getElementById('tele-atk-fail');
-  const teleBenignP50 = document.getElementById('tele-benign-p50');
-  const teleAtkSpread = document.getElementById('tele-atk-spread');
-  const teleAtkStddev = document.getElementById('tele-atk-stddev');
-
-  if (teleBenignReq) teleBenignReq.textContent = base.benign_requests ?? 0;
-  if (teleAtkReq) teleAtkReq.textContent = atk.attacker_requests ?? 0;
-  if (teleBenignFail) teleBenignFail.textContent = `${((base.benign_fail_rate || 0) * 100).toFixed(1)}%`;
-  if (teleAtkFail) teleAtkFail.textContent = `${((atk.attacker_fail_rate || 0) * 100).toFixed(1)}%`;
-  if (teleBenignP50) teleBenignP50.textContent = `${base.benign_latency_p50_ms ?? 0} ms`;
-  if (teleAtkSpread) teleAtkSpread.textContent = `${atk.attacker_latency_p95_p50_diff_ms ?? 0} ms (p95 - p50)`;
-  if (teleAtkStddev) teleAtkStddev.textContent = `${atk.attacker_latency_stddev_ms ?? 0} ms stddev`;
+  // Update Telemetry Profile Table (Per-IP Evaluation)
+  const teleTbody = document.getElementById('telemetry-ips-tbody');
+  if (teleTbody) {
+    const ipTable = kpis.ip_telemetry_table || [];
+    if (!ipTable.length) {
+      teleTbody.innerHTML = '<tr><td colspan="6" style="color:var(--text-muted);text-align:center;padding:12px">Nessuna richiesta <code>/decrypt</code> registrata nella finestra attiva.</td></tr>';
+    } else {
+      teleTbody.innerHTML = ipTable.map(row => {
+        const isViolating = row.is_alerted || row.fail_rate >= 0.70;
+        const statusBadge = isViolating
+          ? `<span style="color:var(--red);font-weight:700">🔴 VIOLAZIONE REGOLA (${escapeHtml(row.evaluation)})</span>`
+          : `<span style="color:var(--green);font-weight:600">🟢 Conforme alla Baseline (Traffico Legittimo)</span>`;
+        const ipColor = isViolating ? 'var(--red)' : '#60a5fa';
+        return `
+          <tr>
+            <td style="font-family:var(--font-mono);font-weight:700;color:${ipColor}">${escapeHtml(row.ip)}</td>
+            <td><strong>${row.requests}</strong> req</td>
+            <td style="color:${isViolating ? 'var(--red)' : 'inherit'};font-weight:700">${row.failed_requests} err (${(row.fail_rate * 100).toFixed(1)}%)</td>
+            <td>${row.latency_p50_ms} ms</td>
+            <td>${row.latency_stddev_ms} ms</td>
+            <td>${statusBadge}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+  }
 
   // Render Alert Cards into both Main Panel and Network Sub-Tab
   const cont = document.getElementById('alerts-content');
@@ -3647,6 +3639,7 @@ async function runHuntingBacktest() {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
+        query: currentSiemQuery,
         min_events_per_ip: minEvents,
         high_fail_rate_threshold: failRate,
         timing_stddev_threshold_ms: timingStd,
