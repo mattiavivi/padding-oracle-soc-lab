@@ -2960,8 +2960,10 @@ async function loadAttackDetail(targetId) {
         }
         if (ev.event_type === 'attack_progress' && ev.details) {
           const d = ev.details;
-          const gIdx = d.global_byte_index !== undefined ? d.global_byte_index : d.byte_index;
-          if (gIdx !== undefined) persistentAttackByteMap[gIdx] = { ...d, ts: ev.ts };
+          const bIdx = d.block_index !== undefined ? d.block_index : 1;
+          const byteIdx = d.byte_index !== undefined ? d.byte_index : 0;
+          const gIdx = d.global_byte_index !== undefined ? d.global_byte_index : ((bIdx - 1) * 16 + byteIdx);
+          persistentAttackByteMap[gIdx] = { ...d, ts: ev.ts };
           if (d.total_blocks) numBlocks = Math.max(numBlocks, d.total_blocks);
         }
         if (ev.event_type === 'attack_complete') {
@@ -3057,7 +3059,7 @@ async function loadAttackDetail(targetId) {
         html += `<div class="byte-grid">`;
         for (let idx = 0; idx < 16; idx++) {
           const globalIdx = (b - 1) * 16 + idx;
-          const cellData = persistentAttackByteMap[globalIdx] || persistentAttackByteMap[idx];
+          const cellData = persistentAttackByteMap[globalIdx];
           let cellClass = '';
           let charVal = '?';
           let hexVal = '0x??';
