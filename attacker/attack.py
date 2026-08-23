@@ -148,7 +148,7 @@ def padding_oracle_attack_block(
                         {
                             "event_type": "attack_blocked",
                             "scenario_id": scenario_id,
-                            "src_ip": "attacker",
+                            "src_ip": get_attack_ip(),
                             "endpoint": "/decrypt",
                             "status_code": 429,
                             "latency_ms": round(latency, 3),
@@ -173,7 +173,7 @@ def padding_oracle_attack_block(
                 {
                     "event_type": "attack_probe",
                     "scenario_id": scenario_id,
-                    "src_ip": "attacker",
+                    "src_ip": get_attack_ip(),
                     "endpoint": "/decrypt",
                     "status_code": status,
                     "latency_ms": round(latency, 3),
@@ -204,7 +204,7 @@ def padding_oracle_attack_block(
                     {
                         "event_type": "attack_progress",
                         "scenario_id": scenario_id,
-                        "src_ip": "attacker",
+                        "src_ip": get_attack_ip(),
                         "endpoint": "/decrypt",
                         "status_code": status,
                         "latency_ms": round(latency, 3),
@@ -342,7 +342,7 @@ def main() -> int:
         {
             "event_type": "attack_complete",
             "scenario_id": args.scenario_id,
-            "src_ip": "attacker",
+            "src_ip": get_attack_ip(),
             "endpoint": "/decrypt",
             "status_code": 200,
             "latency_ms": round(elapsed * 1000, 3),

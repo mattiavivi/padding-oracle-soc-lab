@@ -1975,52 +1975,61 @@ MAIN_PAGE = r"""<!doctype html>
           </div>
         </div>
 
-        <!-- 3. Interactive Rule Builder & Live Backtest -->
-        <div class="card" style="margin:0 0 16px 0">
+        <!-- 3. Detection Engineering: Regola Sigma YAML, Backtest & Deploy WAF -->
+        <div class="card" style="margin:0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-            <h3 style="margin:0;font-size:14px;color:#fff">3. Ingegnerizzazione Regole, Live Backtesting &amp; Deploy Difesa</h3>
-            <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="prefillFromSiemQuery()">🪄 Pre-compila da Query SIEM</button>
-          </div>
-          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px">
-            <div class="form-group">
-              <label class="form-label">Min Richieste Finestra</label>
-              <input class="form-input" type="number" id="hunt-min-events" value="15" min="5" max="100">
+            <div>
+              <h3 style="margin:0;font-size:14px;color:#fff">3. Regola di Detection Sigma YAML, Live Backtesting &amp; Deploy Difesa</h3>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Compilata automaticamente dalla Query SIEM per il rilevamento e il blocco inline (HTTP 429).</div>
             </div>
-            <div class="form-group">
-              <label class="form-label">Soglia Fail-Rate (0.0 - 1.0)</label>
-              <input class="form-input" type="number" id="hunt-fail-rate" value="0.80" min="0.1" max="1.0" step="0.05">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Soglia Timing StdDev (ms)</label>
-              <input class="form-input" type="number" id="hunt-timing-stddev" value="6.0" min="1.0" max="30.0" step="0.5">
-            </div>
-            <div class="form-group">
-              <label class="form-label">Soglia Bimodalità Sarle (BC)</label>
-              <input class="form-input" type="number" id="hunt-bimodality" value="0.555" min="0.3" max="0.99" step="0.05">
+            <div style="display:flex;gap:6px">
+              <button class="btn btn-secondary" style="font-size:11px;padding:4px 8px" onclick="copySigmaYaml()">📋 Copia YAML</button>
             </div>
           </div>
-          <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
-            <button class="btn btn-primary" onclick="runHuntingBacktest()">🔬 Esegui Live Backtest</button>
-            <button class="btn btn-success" onclick="deployHuntingPolicyToWAF()">🚀 Attiva Regola su WAF Vittima &amp; SOC</button>
+
+          <div style="display:grid;grid-template-columns:1.2fr 0.8fr;gap:14px;align-items:start">
+            <!-- Left: Sigma YAML Rule Viewer -->
+            <div>
+              <label class="form-label" style="font-size:11px;color:var(--text-dim)">📜 Specifica Regola Sigma (Standard YAML):</label>
+              <textarea id="sigma-rule-output" class="form-input" rows="11" readonly style="font-family:var(--font-mono);font-size:11px;background:#0d1117;color:#58a6ff;line-height:1.4"></textarea>
+            </div>
+
+            <!-- Right: Threshold Tuning & Action Buttons -->
+            <div>
+              <label class="form-label" style="font-size:11px;color:var(--text-dim)">⚙️ Parametri Soglia &amp; Finestra Temporale:</label>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
+                <div class="form-group" style="margin-bottom:6px">
+                  <label class="form-label" style="font-size:10px">Min Richieste / Finestra</label>
+                  <input class="form-input" type="number" id="hunt-min-events" value="15" min="5" max="100" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                </div>
+                <div class="form-group" style="margin-bottom:6px">
+                  <label class="form-label" style="font-size:10px">Soglia Fail-Rate (0-1)</label>
+                  <input class="form-input" type="number" id="hunt-fail-rate" value="0.80" min="0.1" max="1.0" step="0.05" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                </div>
+                <div class="form-group" style="margin-bottom:6px">
+                  <label class="form-label" style="font-size:10px">Timing StdDev (ms)</label>
+                  <input class="form-input" type="number" id="hunt-timing-stddev" value="6.0" min="1.0" max="30.0" step="0.5" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                </div>
+                <div class="form-group" style="margin-bottom:6px">
+                  <label class="form-label" style="font-size:10px">Bimodalità Sarle (BC)</label>
+                  <input class="form-input" type="number" id="hunt-bimodality" value="0.555" min="0.3" max="0.99" step="0.05" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                </div>
+              </div>
+              <div style="display:flex;gap:8px;flex-direction:column">
+                <button class="btn btn-primary" style="font-size:12px;padding:8px" onclick="runHuntingBacktest()">🔬 Esegui Live Backtest</button>
+                <button class="btn btn-success" style="font-size:12px;padding:8px" onclick="deployHuntingPolicyToWAF()">🚀 Attiva Regola su WAF Vittima &amp; SOC</button>
+              </div>
+            </div>
           </div>
 
           <!-- Backtest Results Box -->
-          <div id="hunting-backtest-result" style="margin-top:14px;padding:12px;background:var(--bg-panel);border-radius:8px;display:none;border:1px solid rgba(255,255,255,0.08)">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div id="hunting-backtest-result" style="margin-top:12px;padding:10px 14px;background:var(--bg-panel);border-radius:8px;display:none;border:1px solid rgba(255,255,255,0.08)">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
               <strong style="color:var(--green)">Risultati Live Backtest:</strong>
               <div id="hunting-kpis-badge" style="font-size:12px;font-weight:700"></div>
             </div>
-            <div id="hunting-backtest-details" style="font-size:12px;color:var(--text-dim)"></div>
+            <div id="hunting-backtest-details" style="font-size:11px;color:var(--text-dim)"></div>
           </div>
-        </div>
-
-        <!-- 4. Compiled Sigma Rule Output -->
-        <div class="card" style="margin:0">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <h3 style="margin:0;font-size:14px;color:#fff">4. Regola di Detection Compilata (Standard Sigma YAML)</h3>
-            <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="copySigmaYaml()">📋 Copia YAML</button>
-          </div>
-          <textarea id="sigma-rule-output" class="form-input" rows="8" readonly style="font-family:var(--font-mono);font-size:11px;background:#0d1117;color:#58a6ff"></textarea>
         </div>
       </div>
 
