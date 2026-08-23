@@ -104,8 +104,18 @@ def _container(name: str):
 
 def _status(name: str) -> dict:
     container = _container(name)
+    role_map = {
+        "victim-vuln": "🖥️ Target Vulnerabile (AES-CBC Oracle 500)",
+        "victim-partial": "⏱️ Target Timing Side-Channel",
+        "victim-fixed": "🛡️ Target Hardened (Costante-Tempo)",
+        "attacker": "🔴 Red Team (Attaccante Padding Oracle)",
+        "benign-1": "🟡 Client Legittimo #1 (Traffico Continuo)",
+        "benign-2": "🟡 Client Legittimo #2 (Traffico Continuo)",
+        "soc": "📊 SIEM & Threat Hunting Engine",
+        "soc-ui": "🌐 Web Console Dashboard",
+    }
     if container is None:
-        return {"name": name, "state": "missing", "image": "-", "ports": "-"}
+        return {"name": name, "role": role_map.get(name, "Servizio"), "ip": "-", "state": "missing", "image": "-", "ports": "-"}
     container.reload()
     ports = container.attrs.get("NetworkSettings", {}).get("Ports", {})
     mapped = []
@@ -114,8 +124,21 @@ def _status(name: str) -> dict:
             continue
         for b in bindings:
             mapped.append(f"{b.get('HostIp')}:{b.get('HostPort')}")
+
+    networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+    ip_addr = "-"
+    if networks:
+        for net_name, net_data in networks.items():
+            if net_data.get("IPAddress"):
+                ip_addr = net_data.get("IPAddress")
+                break
+    if ip_addr == "-":
+        ip_addr = container.attrs.get("NetworkSettings", {}).get("IPAddress") or "-"
+
     return {
         "name": name,
+        "role": role_map.get(name, "Servizio"),
+        "ip": ip_addr,
         "state": container.status,
         "image": container.image.tags[0] if container.image.tags else container.image.short_id,
         "ports": ", ".join(mapped) if mapped else "-",
@@ -767,25 +790,35 @@ def benign_launch():
     iterations = int(data.get("iterations", 100))
     min_ms = int(data.get("min_ms", 100))
     max_ms = int(data.get("max_ms", 500))
+    continuous = bool(data.get("continuous", True))
+    error_rate = float(data.get("error_rate", 3.0))
+
     _start(host)
     victim = _active_victim() or "victim-vuln"
     _start(victim)
+
+    cmd = [
+        "python", "benign/benign_client.py",
+        "--target", f"http://{victim}:8080",
+        "--name", host,
+        "--scenario-id", f"ui-{host}",
+        "--min-sleep-ms", str(min_ms),
+        "--max-sleep-ms", str(max_ms),
+        "--error-rate-pct", str(error_rate),
+    ]
+    if continuous:
+        cmd.append("--continuous")
+    else:
+        cmd.extend(["--iterations", str(iterations)])
+
     _run_one_shot(
         "benign",
-        [
-            "python", "benign/benign_client.py",
-            "--target", f"http://{victim}:8080",
-            "--name", host,
-            "--scenario-id", f"ui-{host}",
-            "--iterations", str(iterations),
-            "--min-sleep-ms", str(min_ms),
-            "--max-sleep-ms", str(max_ms),
-        ],
+        cmd,
         {"LOG_DIR": "/logs"},
         labels={"lab.host": host},
     )
     _ensure_core_services()
-    return jsonify({"ok": True, "iterations": iterations, "host": host})
+    return jsonify({"ok": True, "continuous": continuous, "iterations": iterations, "host": host})
 
 
 
@@ -1449,7 +1482,7 @@ MAIN_PAGE = r"""<!doctype html>
         <span class="nav-icon">🔬</span> Attack Detail
       </a>
       <a class="nav-item" data-panel="docker" onclick="showPanel('docker',this)">
-        <span class="nav-icon">🐳</span> Gestione Docker
+        <span class="nav-icon">📋</span> Inventario Nodi &amp; IP
       </a>
 
       <div class="sidebar-spacer"></div>
@@ -1890,35 +1923,52 @@ MAIN_PAGE = r"""<!doctype html>
         </div>
       </div>
 
-      <!-- ── Docker ── -->
+      <!-- ── Inventario Nodi & Mappatura IP ── -->
       <div id="panel-docker" class="panel docker-panel">
-        <div class="panel-title">🐳 Gestione Docker</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px">
+          <div>
+            <div class="panel-title" style="margin-bottom:2px">📋 Inventario Nodi &amp; Mappatura IP di Rete</div>
+            <div style="font-size:12px;color:var(--text-muted)">Mappa infrastrutturale del laboratorio: risoluzione IP reali della subnet Docker, ruoli applicativi e porte esposte.</div>
+          </div>
+          <button class="btn btn-secondary" style="font-size:12px" onclick="loadDockerStatus()">🔄 Aggiorna Inventario</button>
+        </div>
 
-        <div class="card">
-          <h3>Stato container</h3>
+        <div class="card" style="margin-bottom:16px">
           <table id="docker-table">
-            <thead><tr><th>Servizio</th><th>Stato</th><th>Porte</th><th>Azioni</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Host / Container</th>
+                <th>Ruolo di Rete</th>
+                <th>Indirizzo IP Subnet</th>
+                <th>Stato</th>
+                <th>Porte Mappate</th>
+                <th>Controllo</th>
+              </tr>
+            </thead>
             <tbody id="docker-tbody">
-              <tr><td colspan="4" style="color:var(--text-muted)">Caricamento…</td></tr>
+              <tr><td colspan="6" style="color:var(--text-muted)">Caricamento inventario nodi…</td></tr>
             </tbody>
           </table>
         </div>
-        <div class="card">
-          <h3>Vittima attiva (mutualmente esclusivi)</h3>
-          <form method="post" action="/docker/action/start-victim" style="display:flex;gap:10px;align-items:center">
-            <select name="target" style="flex:1">
-              <option value="victim-vuln">victim-vuln (vulnerabile)</option>
-              <option value="victim-partial">victim-partial (timing)</option>
-              <option value="victim-fixed">victim-fixed (hardened)</option>
+
+        <div class="card" style="margin-bottom:16px">
+          <h3 style="margin:0 0 8px 0;font-size:13px;color:#fff">Target Vittima Attivo (Mutualmente Esclusivi)</h3>
+          <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px 0">Scegli quale implementazione crittografica della vittima deve rispondere alle chiamate HTTP.</p>
+          <form method="post" action="/docker/action/start-victim" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <select name="target" class="form-input" style="max-width:340px">
+              <option value="victim-vuln">victim-vuln (Vulnerabile a Padding Oracle - Status 500)</option>
+              <option value="victim-partial">victim-partial (Timing Side-Channel Oracle - Dispersione latenza)</option>
+              <option value="victim-fixed">victim-fixed (Hardened - Verifica a tempo costante)</option>
             </select>
-            <button class="btn btn-success" type="submit">Attiva</button>
+            <button class="btn btn-success" type="submit">Applica Target</button>
           </form>
         </div>
+
         <div class="card">
-          <h3>Azioni rapide</h3>
+          <h3 style="margin:0 0 8px 0;font-size:13px;color:#fff">Azioni Infrastrutturali Globali</h3>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <form method="post" action="/docker/action/start"><input type="hidden" name="target" value="soc"><button class="btn btn-secondary" type="submit">▶ SOC Collector</button></form>
-            <form method="post" action="/docker/action/stop-all"><button class="btn btn-danger" type="submit">⏹ Stop tutto</button></form>
+            <form style="display:inline" method="post" action="/docker/action/start"><input type="hidden" name="target" value="soc"><button class="btn btn-secondary" type="submit">▶ Riavvia SOC Collector</button></form>
+            <form style="display:inline" method="post" action="/docker/action/stop-all"><button class="btn btn-danger" type="submit">⏹ Stop Tutti i Container</button></form>
           </div>
         </div>
       </div>
@@ -1957,25 +2007,61 @@ MAIN_PAGE = r"""<!doctype html>
 
 <!-- ══ MODAL: Benign ══ -->
 <div class="modal-overlay" id="modal-benign">
-  <div class="modal">
-    <div class="modal-title">🟡 Configura traffico benigno</div>
-    <div class="modal-sub">Ogni host ha i suoi parametri. Il click sul nodo host attiva o spegne solo il Docker del nodo.</div>
+  <div class="modal" style="max-width:580px;width:95%">
+    <div class="modal-title">🟡 Configura Traffico Benigno (Multi-API &amp; Noise)</div>
+    <div class="modal-sub">I client legittimi simulano sessioni utente reali (Login, Profilo, Encrypt, Decrypt, Verify) con rumore fisiologico controllato.</div>
+    
     <div class="card" style="padding:12px 14px;margin-bottom:12px;background:var(--bg-panel)">
-      <div class="panel-title" style="font-size:12px;margin-bottom:10px">Host 1 — benign-1</div>
-      <div class="form-group"><label class="form-label">Iterazioni</label><input class="form-input" type="number" id="benign-1-iter" value="100" min="10" max="2000"></div>
-      <div class="form-group"><label class="form-label">Sleep minimo (ms)</label><input class="form-input" type="number" id="benign-1-min" value="100" min="0"></div>
-      <div class="form-group"><label class="form-label">Sleep massimo (ms)</label><input class="form-input" type="number" id="benign-1-max" value="500" min="0"></div>
-      <div class="modal-actions">
-        <button class="btn btn-primary" onclick="saveBenignConfig('benign-1')"><span class="spinner" id="spin-benign-1"></span> Salva</button>
+      <div class="panel-title" style="font-size:12px;margin-bottom:8px">Host 1 — benign-1</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group">
+          <label class="form-label">Modalità Traffico</label>
+          <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="benign-1-continuous" checked> Loop Continuo (Consigliato)
+          </label>
+        </div>
+        <div class="form-group">
+          <label class="form-label">% Errori Fisiologici (400/401/404)</label>
+          <input class="form-input" type="number" id="benign-1-err-rate" value="3.0" min="0" max="25" step="0.5">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Sleep Minimo (ms)</label>
+          <input class="form-input" type="number" id="benign-1-min" value="100" min="10">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Sleep Massimo (ms)</label>
+          <input class="form-input" type="number" id="benign-1-max" value="500" min="20">
+        </div>
+      </div>
+      <div class="modal-actions" style="margin-top:8px">
+        <button class="btn btn-primary" onclick="saveBenignConfig('benign-1')"><span class="spinner" id="spin-benign-1"></span> Salva Config benign-1</button>
       </div>
     </div>
+
     <div class="card" style="padding:12px 14px;background:var(--bg-panel)">
-      <div class="panel-title" style="font-size:12px;margin-bottom:10px">Host 2 — benign-2</div>
-      <div class="form-group"><label class="form-label">Iterazioni</label><input class="form-input" type="number" id="benign-2-iter" value="100" min="10" max="2000"></div>
-      <div class="form-group"><label class="form-label">Sleep minimo (ms)</label><input class="form-input" type="number" id="benign-2-min" value="100" min="0"></div>
-      <div class="form-group"><label class="form-label">Sleep massimo (ms)</label><input class="form-input" type="number" id="benign-2-max" value="500" min="0"></div>
-      <div class="modal-actions">
-        <button class="btn btn-primary" onclick="saveBenignConfig('benign-2')"><span class="spinner" id="spin-benign-2"></span> Salva</button>
+      <div class="panel-title" style="font-size:12px;margin-bottom:8px">Host 2 — benign-2</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="form-group">
+          <label class="form-label">Modalità Traffico</label>
+          <label style="font-size:12px;color:var(--text);display:flex;align-items:center;gap:6px">
+            <input type="checkbox" id="benign-2-continuous" checked> Loop Continuo (Consigliato)
+          </label>
+        </div>
+        <div class="form-group">
+          <label class="form-label">% Errori Fisiologici (400/401/404)</label>
+          <input class="form-input" type="number" id="benign-2-err-rate" value="3.0" min="0" max="25" step="0.5">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Sleep Minimo (ms)</label>
+          <input class="form-input" type="number" id="benign-2-min" value="150" min="10">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Sleep Massimo (ms)</label>
+          <input class="form-input" type="number" id="benign-2-max" value="600" min="20">
+        </div>
+      </div>
+      <div class="modal-actions" style="margin-top:8px">
+        <button class="btn btn-primary" onclick="saveBenignConfig('benign-2')"><span class="spinner" id="spin-benign-2"></span> Salva Config benign-2</button>
       </div>
     </div>
     <div class="modal-actions"><button class="btn btn-secondary" onclick="closeModal('modal-benign')">Chiudi</button></div>
@@ -1984,9 +2070,9 @@ MAIN_PAGE = r"""<!doctype html>
 
 <!-- ══ MODAL: Attacker ══ -->
 <div class="modal-overlay" id="modal-attacker">
-  <div class="modal">
-    <div class="modal-title">🔴 Configura attacco Padding Oracle</div>
-    <div class="modal-sub">Imposta segreto e velocità. Start avvia attacco; Stop ferma attacco. Click sul nodo host = on/off Docker.</div>
+  <div class="modal" style="max-width:580px;width:95%">
+    <div class="modal-title">🔴 Configura Attacco Padding Oracle</div>
+    <div class="modal-sub">Personalizza il segreto target, la modalità oracle e la frequenza di probing dell'attaccante.</div>
     <div class="form-group">
       <label class="form-label">🔑 Segreto Vittima</label>
       <div class="radio-group">
@@ -2002,15 +2088,15 @@ MAIN_PAGE = r"""<!doctype html>
       <input class="form-input" type="text" id="atk-secret-input" value="PaddingOracle:TopSecret" placeholder="Es. PaddingOracle:TopSecret" style="margin-top:8px">
     </div>
     <div class="form-group">
-      <label class="form-label">Modalità oracle</label>
+      <label class="form-label">Modalità Oracle</label>
       <div class="radio-group">
         <label class="radio-opt">
           <input type="radio" name="atk-mode" value="vuln" checked>
-          <div><div class="opt-label">vuln (status-based)</div><div class="opt-desc">Usa codici HTTP differenti per rilevare il padding</div></div>
+          <div><div class="opt-label">vuln (status-based)</div><div class="opt-desc">Usa codici HTTP differenti (500 vs 403) per rilevare il padding</div></div>
         </label>
         <label class="radio-opt">
           <input type="radio" name="atk-mode" value="timing">
-          <div><div class="opt-label">timing (side-channel)</div><div class="opt-desc">Usa la latenza di risposta come oracle</div></div>
+          <div><div class="opt-label">timing (side-channel)</div><div class="opt-desc">Usa la latenza di risposta come side-channel</div></div>
         </label>
       </div>
     </div>
@@ -3599,9 +3685,8 @@ function copySigmaYaml() {
 }
 
 
-// ── Docker status table ──
+// ── Docker / Node Inventory status table ──
 async function loadDockerStatus() {
-
   try {
     const r = await fetch('/status');
     const d = await r.json();
@@ -3609,25 +3694,24 @@ async function loadDockerStatus() {
     const tbody = document.getElementById('docker-tbody');
     const order = ['victim-vuln','victim-partial','victim-fixed','benign-1','benign-2','attacker','soc','soc-ui'];
     tbody.innerHTML = order.map(name => {
-      const s = svcs[name] || { name, state: 'missing', image: '-', ports: '-' };
+      const s = svcs[name] || { name, role: 'Servizio', ip: '-', state: 'missing', image: '-', ports: '-' };
       const stateClass = s.state === 'running' ? 'state-running' : s.state === 'exited' ? 'state-exited' : 'state-missing';
       const isSelf = name === 'soc-ui';
-      const isOneShot = name === 'attacker' || name.startsWith('benign-');
       const actions = isSelf
         ? '<span style="color:var(--text-dim)">self</span>'
-        : isOneShot
-          ? '<span style="color:var(--text-dim);font-size:11px">gestito da Network</span>'
-          : `
-            <form style="display:inline" method="post" action="/docker/action/start">
-              <input type="hidden" name="target" value="${name}">
-              <button class="btn btn-secondary" type="submit" style="font-size:11px;padding:4px 9px">▶</button>
-            </form>
-            ${name === 'soc' ? '<span style="color:var(--text-dim);font-size:11px;margin-left:4px">locked</span>' : `<form style="display:inline" method="post" action="/docker/action/stop">
-              <input type="hidden" name="target" value="${name}">
-              <button class="btn btn-danger" type="submit" style="font-size:11px;padding:4px 9px">⏹</button>
-            </form>`}`;
+        : `
+          <form style="display:inline" method="post" action="/docker/action/start">
+            <input type="hidden" name="target" value="${name}">
+            <button class="btn btn-secondary" type="submit" style="font-size:11px;padding:3px 8px" title="Avvia / Riavvia container">▶</button>
+          </form>
+          ${name === 'soc' ? '' : `<form style="display:inline" method="post" action="/docker/action/stop">
+            <input type="hidden" name="target" value="${name}">
+            <button class="btn btn-danger" type="submit" style="font-size:11px;padding:3px 8px" title="Arresta container">⏹</button>
+          </form>`}`;
       return `<tr>
-        <td style="font-family:var(--font-mono);font-size:11px">${name}</td>
+        <td style="font-family:var(--font-mono);font-size:11px;font-weight:700">${name}</td>
+        <td style="font-size:12px">${escapeHtml(s.role || '-')}</td>
+        <td style="font-family:var(--font-mono);font-size:11px;color:#60a5fa;font-weight:600">${escapeHtml(s.ip || '-')}</td>
         <td><span class="${stateClass}">${s.state}</span></td>
         <td style="font-size:11px;color:var(--text-muted)">${s.ports}</td>
         <td>${actions}</td>
@@ -3667,8 +3751,12 @@ async function toggleHost(name) {
 }
 
 function readBenignConfig(host) {
+  const continuous = document.getElementById(`${host}-continuous`) ? document.getElementById(`${host}-continuous`).checked : true;
+  const errRate = parseFloat(document.getElementById(`${host}-err-rate`)?.value) || 3.0;
   return {
-    iterations: parseInt(document.getElementById(`${host}-iter`)?.value) || 100,
+    continuous: continuous,
+    error_rate: errRate,
+    iterations: 100,
     min_ms: parseInt(document.getElementById(`${host}-min`)?.value) || 100,
     max_ms: parseInt(document.getElementById(`${host}-max`)?.value) || 500,
   };
