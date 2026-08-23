@@ -327,39 +327,66 @@ def _handle_shutdown_signal(signum, _frame) -> None:
 # Log helpers
 # ---------------------------------------------------------------------------
 
+def _tail_lines(path: Path, max_lines: int = 2000) -> list[str]:
+    """Efficiently read up to max_lines from the end of a log file without reading the whole file."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size == 0:
+                return []
+            buffer_size = 8192
+            lines: list[str] = []
+            remainder = b""
+            offset = size
+            while offset > 0 and len(lines) < max_lines:
+                read_size = min(buffer_size, offset)
+                offset -= read_size
+                f.seek(offset)
+                chunk = f.read(read_size) + remainder
+                split = chunk.split(b"\n")
+                remainder = split[0]
+                for l in reversed(split[1:]):
+                    l_str = l.strip()
+                    if l_str:
+                        lines.append(l_str.decode("utf-8", errors="ignore"))
+                        if len(lines) >= max_lines:
+                            break
+            if remainder.strip() and len(lines) < max_lines:
+                lines.append(remainder.strip().decode("utf-8", errors="ignore"))
+            return list(reversed(lines))
+    except Exception:
+        return []
+
+
 def _read_events(limit: int = 1000, service: str | None = None, q: str | None = None) -> list[dict]:
     events: list[dict] = []
+    max_to_fetch = max(limit * 2, 2000) if limit > 0 else 50000
     for path in sorted(LOG_DIR.glob("*.jsonl")):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        ev = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if service:
-                        svc_str = str(ev.get("service", ""))
-                        etype_str = str(ev.get("event_type", ""))
-                        if service == "benign":
-                            is_match = svc_str.startswith("benign") or "benign" in svc_str
-                        elif service == "attacker":
-                            is_match = svc_str == "attacker" or svc_str.startswith("attacker") or etype_str.startswith("attack")
-                        elif service == "victim":
-                            is_match = svc_str.startswith("victim")
-                        else:
-                            is_match = svc_str == service or svc_str.startswith(service)
-                        if not is_match:
-                            continue
-                    if q:
-                        blob = json.dumps(ev, sort_keys=True)
-                        if q.lower() not in blob.lower():
-                            continue
-                    events.append(ev)
-        except FileNotFoundError:
-            continue
+        lines = _tail_lines(path, max_lines=max_to_fetch)
+        for line in lines:
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if service:
+                svc_str = str(ev.get("service", ""))
+                etype_str = str(ev.get("event_type", ""))
+                if service == "benign":
+                    is_match = svc_str.startswith("benign") or "benign" in svc_str
+                elif service == "attacker":
+                    is_match = svc_str == "attacker" or svc_str.startswith("attacker") or etype_str.startswith("attack")
+                elif service == "victim":
+                    is_match = svc_str.startswith("victim")
+                else:
+                    is_match = svc_str == service or svc_str.startswith(service)
+                if not is_match:
+                    continue
+            if q:
+                blob = json.dumps(ev, sort_keys=True)
+                if q.lower() not in blob.lower():
+                    continue
+            events.append(ev)
     # Sort by timestamp so the tail is genuinely chronological across all files
     def _ts_key(ev: dict) -> str:
         return str(ev.get("ts", "") or "")
@@ -2026,11 +2053,11 @@ MAIN_PAGE = r"""<!doctype html>
         </div>
         <div class="form-group">
           <label class="form-label">Sleep Minimo (ms)</label>
-          <input class="form-input" type="number" id="benign-1-min" value="100" min="10">
+          <input class="form-input" type="number" id="benign-1-min" value="500" min="50">
         </div>
         <div class="form-group">
           <label class="form-label">Sleep Massimo (ms)</label>
-          <input class="form-input" type="number" id="benign-1-max" value="500" min="20">
+          <input class="form-input" type="number" id="benign-1-max" value="1200" min="100">
         </div>
       </div>
       <div class="modal-actions" style="margin-top:8px">
@@ -2053,11 +2080,11 @@ MAIN_PAGE = r"""<!doctype html>
         </div>
         <div class="form-group">
           <label class="form-label">Sleep Minimo (ms)</label>
-          <input class="form-input" type="number" id="benign-2-min" value="150" min="10">
+          <input class="form-input" type="number" id="benign-2-min" value="600" min="50">
         </div>
         <div class="form-group">
           <label class="form-label">Sleep Massimo (ms)</label>
-          <input class="form-input" type="number" id="benign-2-max" value="600" min="20">
+          <input class="form-input" type="number" id="benign-2-max" value="1500" min="100">
         </div>
       </div>
       <div class="modal-actions" style="margin-top:8px">
@@ -2101,8 +2128,8 @@ MAIN_PAGE = r"""<!doctype html>
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label">Delay tra probe (ms) — 0 = massima velocità</label>
-      <input class="form-input" type="number" id="atk-sleep" value="0" min="0" max="1000" step="1">
+      <label class="form-label">Delay tra probe (ms) — Consigliato: 4ms per ~45s di demo fluida</label>
+      <input class="form-input" type="number" id="atk-sleep" value="4" min="0" max="1000" step="1">
     </div>
     <div class="modal-actions">
       <button class="btn btn-secondary" onclick="closeModal('modal-attacker')">Chiudi</button>
@@ -3759,19 +3786,20 @@ function readBenignConfig(host) {
     continuous: continuous,
     error_rate: errRate,
     iterations: 100,
-    min_ms: parseInt(document.getElementById(`${host}-min`)?.value) || 100,
-    max_ms: parseInt(document.getElementById(`${host}-max`)?.value) || 500,
+    min_ms: parseInt(document.getElementById(`${host}-min`)?.value) || 500,
+    max_ms: parseInt(document.getElementById(`${host}-max`)?.value) || 1200,
   };
 }
 
 function readAttackConfig() {
   const secretMode = document.querySelector('input[name="atk-secret-mode"]:checked')?.value || 'manual';
   const secretInput = document.getElementById('atk-secret-input');
+  const sleepVal = document.getElementById('atk-sleep')?.value;
   return {
     secretMode,
     secret: (secretInput?.value || '').trim(),
     mode: document.querySelector('input[name="atk-mode"]:checked')?.value || 'vuln',
-    sleep_ms: parseFloat(document.getElementById('atk-sleep')?.value) || 0,
+    sleep_ms: (sleepVal !== undefined && sleepVal !== '') ? parseFloat(sleepVal) : 4,
   };
 }
 

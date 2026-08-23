@@ -26,8 +26,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scenario-id", default="baseline")
     p.add_argument("--iterations", type=int, default=100)
     p.add_argument("--continuous", action="store_true", help="Run indefinitely in a background loop")
-    p.add_argument("--min-sleep-ms", type=int, default=100)
-    p.add_argument("--max-sleep-ms", type=int, default=600)
+    p.add_argument("--min-sleep-ms", type=int, default=500)
+    p.add_argument("--max-sleep-ms", type=int, default=1500)
     p.add_argument("--error-rate-pct", type=float, default=3.0, help="Percentage of requests with physiological errors")
     return p.parse_args()
 
