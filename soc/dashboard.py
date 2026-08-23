@@ -867,7 +867,8 @@ def benign_pause():
 def attacker_launch():
     data = request.get_json(force=True, silent=True) or {}
     mode = data.get("mode", "vuln")
-    sleep_ms = float(data.get("sleep_ms", 0.0))
+    sleep_ms = float(data.get("sleep_ms", 4.0))
+    ip_mode = data.get("ip_mode", "static")
     target_name = data.get("target", _active_victim() or "victim-vuln")
     scenario_id = f"attack-{mode}-{int(time.time()*1000)}"
     _start(target_name)
@@ -879,12 +880,13 @@ def attacker_launch():
             "--target", f"http://{target_name}:8080",
             "--mode", mode,
             "--sleep-ms", str(sleep_ms),
+            "--ip-mode", ip_mode,
             "--scenario-id", scenario_id,
         ],
         {"LOG_DIR": "/logs"},
         labels={"lab.host": "attacker"},
     )
-    return jsonify({"ok": True, "mode": mode, "target": target_name, "scenario_id": scenario_id})
+    return jsonify({"ok": True, "mode": mode, "ip_mode": ip_mode, "target": target_name, "scenario_id": scenario_id})
 
 
 
@@ -2124,6 +2126,23 @@ MAIN_PAGE = r"""<!doctype html>
         <label class="radio-opt">
           <input type="radio" name="atk-mode" value="timing">
           <div><div class="opt-label">timing (side-channel)</div><div class="opt-desc">Usa la latenza di risposta come side-channel</div></div>
+        </label>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Origine Indirizzo IP Attaccante</label>
+      <div class="radio-group">
+        <label class="radio-opt">
+          <input type="radio" name="atk-ip-mode" value="static" checked>
+          <div><div class="opt-label">IP Statico Container</div><div class="opt-desc">Usa l'IP reale del container Docker (es. 172.28.0.5)</div></div>
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="atk-ip-mode" value="random">
+          <div><div class="opt-label">IP Spoofing Singolo</div><div class="opt-desc">Simula un IP esterno casuale fisso (198.51.100.x)</div></div>
+        </label>
+        <label class="radio-opt">
+          <input type="radio" name="atk-ip-mode" value="rotate">
+          <div><div class="opt-label">Proxy Pool / Botnet (Rotante)</div><div class="opt-desc">Ruota l'IP a ogni richiesta per evadere rate-limiting</div></div>
         </label>
       </div>
     </div>
@@ -3795,10 +3814,12 @@ function readAttackConfig() {
   const secretMode = document.querySelector('input[name="atk-secret-mode"]:checked')?.value || 'manual';
   const secretInput = document.getElementById('atk-secret-input');
   const sleepVal = document.getElementById('atk-sleep')?.value;
+  const ipMode = document.querySelector('input[name="atk-ip-mode"]:checked')?.value || 'static';
   return {
     secretMode,
     secret: (secretInput?.value || '').trim(),
     mode: document.querySelector('input[name="atk-mode"]:checked')?.value || 'vuln',
+    ip_mode: ipMode,
     sleep_ms: (sleepVal !== undefined && sleepVal !== '') ? parseFloat(sleepVal) : 4,
   };
 }
@@ -3930,7 +3951,7 @@ async function startAttackerTraffic() {
     const r = await fetch('/nodes/attacker/launch', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ mode: cfg.mode, sleep_ms: cfg.sleep_ms, target: victimName }),
+      body: JSON.stringify({ mode: cfg.mode, sleep_ms: cfg.sleep_ms, ip_mode: cfg.ip_mode, target: victimName }),
     });
     const d = await r.json();
     if (!r.ok || !d.ok) throw new Error(d.error || 'Impossibile avviare attacco');

