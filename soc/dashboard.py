@@ -15,6 +15,8 @@ import requests
 from docker.errors import APIError, NotFound
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
+from common.siem_query import filter_and_aggregate_events
+
 
 app = Flask(__name__)
 app.secret_key = os.getenv("UI_SECRET_KEY", "soc-lab-ui")
@@ -1712,23 +1714,83 @@ MAIN_PAGE = r"""<!doctype html>
       </div>
 
 
-      <!-- ── Threat Hunting & Inline WAF Studio ── -->
+      <!-- ── Threat Hunting & SIEM Explorer (Fase 1) ── -->
       <div id="panel-hunting" class="panel alerts-panel">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px">
           <div>
-            <div class="panel-title" style="margin-bottom:2px">🎯 SOC Threat Hunting & WAF Engineering Studio</div>
-            <div style="font-size:12px;color:var(--text-muted)">Analizza i log grezzi, scopri la signature dell'attacco crittografico, effettua il Live Backtesting e applica la policy al WAF inline della vittima.</div>
+            <div class="panel-title" style="margin-bottom:2px">🎯 SOC Threat Hunting &amp; SIEM Explorer</div>
+            <div style="font-size:12px;color:var(--text-muted)"><strong>Fase 1:</strong> Esplora i log grezzi con query SIEM, formula le regole di detection, effettua il Live Backtest e distribuisci la protezione attiva su WAF &amp; SOC.</div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <span id="waf-global-badge" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:12px;background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.3)">⚫ WAF DISATTIVO</span>
-            <button class="btn btn-primary" style="font-size:12px" onclick="toggleWAFPolicy()">🛡️ Toggle WAF Vittima</button>
+            <span id="waf-global-badge" style="font-size:11px;font-weight:700;padding:4px 10px;border-radius:12px;background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.3)">⚫ WAF &amp; REGOLE DISATTIVE</span>
+            <button class="btn btn-primary" style="font-size:12px" onclick="toggleWAFPolicy()">🛡️ Toggle WAF / Regole</button>
           </div>
         </div>
 
-        <!-- 1. Raw Telemetry Actor Profiles -->
+        <!-- 1. SIEM Query Bar & Preset Chips -->
+        <div class="card" style="margin:0 0 16px 0;border:1px solid rgba(99,102,241,0.3);background:linear-gradient(180deg, rgba(30,27,75,0.4) 0%, rgba(15,23,42,0.6) 100%)">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span style="font-size:16px">🔍</span>
+              <h3 style="margin:0;font-size:14px;color:#fff">Barra di Ricerca SIEM &amp; Filtro Log</h3>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted)">Sintassi: <code>status = 500 AND endpoint = /decrypt</code></div>
+          </div>
+
+          <!-- Query Input -->
+          <div style="display:flex;gap:8px;margin-bottom:10px">
+            <input id="siem-query-input" class="form-input" style="font-family:var(--font-mono);font-size:13px;background:#0d1117;color:#58a6ff;border-color:rgba(99,102,241,0.4)" placeholder="Digita query SIEM (es. status = 500 AND endpoint = /decrypt o latency > 15)" value="status = 500 AND endpoint = /decrypt" onkeydown="if(event.key==='Enter') executeSiemQuery()">
+            <button class="btn btn-primary" style="font-size:12px;padding:8px 16px;white-space:nowrap" onclick="executeSiemQuery()">🔎 Esegui Query</button>
+            <button class="btn btn-secondary" style="font-size:12px;padding:8px 12px;white-space:nowrap" onclick="applySiemPreset('*')">♻️ Reset</button>
+          </div>
+
+          <!-- Clickable Preset Chips -->
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px">
+            <span style="font-size:11px;font-weight:600;color:var(--text-muted);margin-right:4px">Suggerimenti Rapidi:</span>
+            <button class="btn" style="font-size:11px;padding:3px 8px;background:rgba(239,68,68,0.12);color:var(--red);border:1px solid rgba(239,68,68,0.3)" onclick="applySiemPreset('status = 500 AND endpoint = /decrypt')">📌 Padding Oracle 500</button>
+            <button class="btn" style="font-size:11px;padding:3px 8px;background:rgba(245,158,11,0.12);color:var(--amber);border:1px solid rgba(245,158,11,0.3)" onclick="applySiemPreset('latency > 15 AND endpoint = /decrypt')">📌 Timing Discrepancy (&gt;15ms)</button>
+            <button class="btn" style="font-size:11px;padding:3px 8px;background:rgba(168,85,247,0.12);color:#c084fc;border:1px solid rgba(168,85,247,0.3)" onclick="applySiemPreset('status != 200')">📌 Tutti gli Errori (status != 200)</button>
+            <button class="btn" style="font-size:11px;padding:3px 8px;background:rgba(59,130,246,0.12);color:#60a5fa;border:1px solid rgba(59,130,246,0.3)" onclick="applySiemPreset('COUNT > 15 AND FAIL_RATE > 0.70')">📌 Burst Attacco (Count &gt; 15, Fail &gt; 70%)</button>
+            <button class="btn" style="font-size:11px;padding:3px 8px;background:rgba(16,185,129,0.12);color:var(--green);border:1px solid rgba(16,185,129,0.3)" onclick="applySiemPreset('status = 200')">📌 Traffico Regolare (200 OK)</button>
+            <button class="btn" style="font-size:11px;padding:3px 8px;background:rgba(255,255,255,0.06);color:var(--text-muted);border:1px solid var(--border)" onclick="applySiemPreset('*')">📌 Tutti i Log (*)</button>
+          </div>
+
+          <!-- SIEM Summary Metrics Banner -->
+          <div id="siem-summary-banner" style="display:flex;flex-wrap:wrap;gap:8px;padding:8px 12px;background:rgba(0,0,0,0.3);border-radius:6px;font-size:12px;align-items:center">
+            <span style="font-weight:600;color:#fff">Risultati Query:</span>
+            <span id="siem-stat-total" class="stat-pill">Trovati: <strong>0</strong></span>
+            <span id="siem-stat-200" class="stat-pill" style="color:var(--green)">HTTP 200: <strong>0</strong></span>
+            <span id="siem-stat-400" class="stat-pill" style="color:var(--amber)">HTTP 400: <strong>0</strong></span>
+            <span id="siem-stat-403" class="stat-pill" style="color:var(--amber)">HTTP 403: <strong>0</strong></span>
+            <span id="siem-stat-429" class="stat-pill" style="color:#c084fc">HTTP 429 (WAF): <strong>0</strong></span>
+            <span id="siem-stat-500" class="stat-pill" style="color:var(--red)">HTTP 500 (Padding): <strong>0</strong></span>
+          </div>
+
+          <!-- Filtered Log Table Preview -->
+          <div style="margin-top:10px;max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+            <table style="width:100%;font-size:11px;font-family:var(--font-mono)">
+              <thead style="position:sticky;top:0;background:var(--bg-panel);z-index:2">
+                <tr>
+                  <th style="padding:6px 8px">Timestamp</th>
+                  <th style="padding:6px 8px">Client / IP</th>
+                  <th style="padding:6px 8px">Endpoint</th>
+                  <th style="padding:6px 8px">Status</th>
+                  <th style="padding:6px 8px">Latenza</th>
+                  <th style="padding:6px 8px">Ciphertext</th>
+                  <th style="padding:6px 8px">Error Type</th>
+                </tr>
+              </thead>
+              <tbody id="siem-logs-tbody">
+                <tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:12px">Nessuna ricerca eseguita. Clicca "Esegui Query" o un suggerimento rapido.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 2. Raw Telemetry Actor Profiles -->
         <div class="card" style="margin:0 0 16px 0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-            <h3 style="margin:0;font-size:14px;color:#fff">1. Telemetria Grezza: Profilazione Attori &amp; Feature Crittografiche</h3>
+            <h3 style="margin:0;font-size:14px;color:#fff">2. Telemetria Grezza: Profilazione Attori &amp; Feature Crittografiche</h3>
             <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="loadHuntingData()">🔄 Aggiorna Profili</button>
           </div>
           <div style="overflow-x:auto">
@@ -1751,9 +1813,12 @@ MAIN_PAGE = r"""<!doctype html>
           </div>
         </div>
 
-        <!-- 2. Interactive Rule Builder & Live Backtest -->
+        <!-- 3. Interactive Rule Builder & Live Backtest -->
         <div class="card" style="margin:0 0 16px 0">
-          <h3 style="margin:0 0 10px 0;font-size:14px;color:#fff">2. Rule Engineering &amp; Live Backtesting</h3>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+            <h3 style="margin:0;font-size:14px;color:#fff">3. Ingegnerizzazione Regole, Live Backtesting &amp; Deploy Difesa</h3>
+            <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="prefillFromSiemQuery()">🪄 Pre-compila da Query SIEM</button>
+          </div>
           <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:12px">
             <div class="form-group">
               <label class="form-label">Min Richieste Finestra</label>
@@ -1774,7 +1839,7 @@ MAIN_PAGE = r"""<!doctype html>
           </div>
           <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap">
             <button class="btn btn-primary" onclick="runHuntingBacktest()">🔬 Esegui Live Backtest</button>
-            <button class="btn btn-success" onclick="deployHuntingPolicyToWAF()">🚀 Applica Regola su WAF Vittima</button>
+            <button class="btn btn-success" onclick="deployHuntingPolicyToWAF()">🚀 Attiva Regola su WAF Vittima &amp; SOC</button>
           </div>
 
           <!-- Backtest Results Box -->
@@ -1787,10 +1852,10 @@ MAIN_PAGE = r"""<!doctype html>
           </div>
         </div>
 
-        <!-- 3. Compiled Sigma Rule Output -->
+        <!-- 4. Compiled Sigma Rule Output -->
         <div class="card" style="margin:0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-            <h3 style="margin:0;font-size:14px;color:#fff">3. Regola di Detection Compilata (Standard Sigma YAML)</h3>
+            <h3 style="margin:0;font-size:14px;color:#fff">4. Regola di Detection Compilata (Standard Sigma YAML)</h3>
             <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="copySigmaYaml()">📋 Copia YAML</button>
           </div>
           <textarea id="sigma-rule-output" class="form-input" rows="8" readonly style="font-family:var(--font-mono);font-size:11px;background:#0d1117;color:#58a6ff"></textarea>
@@ -1979,7 +2044,7 @@ function showPanel(name, el) {
   if (el) el.classList.add('active');
   currentPanel = name;
   if (name === 'alerts') loadAlerts();
-  if (name === 'hunting') { loadHuntingData(); updateWAFBadge(); }
+  if (name === 'hunting') { loadHuntingData(); updateWAFBadge(); executeSiemQuery(); }
   if (name === 'docker') loadDockerStatus();
   if (name === 'log-raw') loadRawLogs();
   if (name === 'log-soc') loadSocLogs();
@@ -3244,6 +3309,111 @@ async function updateWAFBadge() {
   } catch (e) { /* ignore */ }
 }
 
+// ── SIEM Query Engine & Log Explorer ──
+let currentSiemQuery = 'status = 500 AND endpoint = /decrypt';
+
+async function executeSiemQuery(customQ) {
+  const q = customQ !== undefined ? customQ : (document.getElementById('siem-query-input')?.value || '*');
+  currentSiemQuery = q;
+  const inputEl = document.getElementById('siem-query-input');
+  if (inputEl && customQ !== undefined) inputEl.value = q;
+
+  const tbody = document.getElementById('siem-logs-tbody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:10px">Esecuzione query SIEM…</td></tr>';
+
+  try {
+    const res = await fetch('/hunting/query', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ query: q, window_minutes: 15 }),
+    });
+    const data = await res.json();
+    renderSiemResults(data);
+  } catch (e) {
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="color:var(--red);text-align:center;padding:10px">Errore query: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function applySiemPreset(presetStr) {
+  const input = document.getElementById('siem-query-input');
+  if (input) input.value = presetStr;
+  executeSiemQuery(presetStr);
+}
+
+function prefillFromSiemQuery() {
+  const q = (document.getElementById('siem-query-input')?.value || '').toLowerCase();
+  if (q.includes('500') || q.includes('padding') || q.includes('fail_rate')) {
+    document.getElementById('hunt-min-events').value = 15;
+    document.getElementById('hunt-fail-rate').value = 0.80;
+    document.getElementById('hunt-timing-stddev').value = 6.0;
+  } else if (q.includes('latency') || q.includes('timing')) {
+    document.getElementById('hunt-min-events').value = 15;
+    document.getElementById('hunt-fail-rate').value = 0.70;
+    document.getElementById('hunt-timing-stddev').value = 5.0;
+    document.getElementById('hunt-bimodality').value = 0.50;
+  }
+  alert('🪄 Parametri della regola compilati automaticamente in base alla query SIEM!');
+  runHuntingBacktest();
+}
+
+function renderSiemResults(data) {
+  const total = data.total_matched || 0;
+  const statTotal = document.getElementById('siem-stat-total');
+  if (statTotal) statTotal.innerHTML = `Trovati: <strong>${total}</strong>`;
+
+  const dist = data.status_distribution || {};
+  const el200 = document.getElementById('siem-stat-200');
+  const el400 = document.getElementById('siem-stat-400');
+  const el403 = document.getElementById('siem-stat-403');
+  const el429 = document.getElementById('siem-stat-429');
+  const el500 = document.getElementById('siem-stat-500');
+
+  if (el200) el200.innerHTML = `HTTP 200: <strong>${dist['200'] || 0}</strong>`;
+  if (el400) el400.innerHTML = `HTTP 400: <strong>${dist['400'] || 0}</strong>`;
+  if (el403) el403.innerHTML = `HTTP 403: <strong>${dist['403'] || 0}</strong>`;
+  if (el429) el429.innerHTML = `HTTP 429 (WAF): <strong>${dist['429'] || 0}</strong>`;
+  if (el500) el500.innerHTML = `HTTP 500 (Padding): <strong>${dist['500'] || 0}</strong>`;
+
+  const tbody = document.getElementById('siem-logs-tbody');
+  if (!tbody) return;
+
+  const events = data.events || [];
+  if (!events.length) {
+    tbody.innerHTML = '<tr><td colspan="7" style="color:var(--text-muted);text-align:center;padding:12px">Nessun evento corrisponde alla query SIEM nella finestra corrente.</td></tr>';
+    return;
+  }
+
+  const rows = events.slice(-50).reverse().map(ev => {
+    const sc = ev.status_code || 0;
+    let scColor = 'var(--text-muted)';
+    if (sc === 200) scColor = 'var(--green)';
+    else if (sc === 400 || sc === 403) scColor = 'var(--amber)';
+    else if (sc === 429) scColor = '#c084fc';
+    else if (sc === 500) scColor = 'var(--red)';
+
+    const ts = ev.ts ? ev.ts.substring(11, 19) : '—';
+    const ip = ev.src_ip || '—';
+    const ep = ev.endpoint || '—';
+    const lat = ev.latency_ms !== undefined ? `${ev.latency_ms} ms` : '—';
+    const cLen = ev.ciphertext_len ? `${ev.ciphertext_len}B` : '—';
+    const errType = ev.error_type || 'ok';
+
+    return `
+      <tr>
+        <td style="color:var(--text-dim);padding:4px 8px">${escapeHtml(ts)}</td>
+        <td style="font-weight:600;color:#fff;padding:4px 8px">${escapeHtml(ip)}</td>
+        <td style="color:var(--blue);padding:4px 8px">${escapeHtml(ep)}</td>
+        <td style="padding:4px 8px"><span style="color:${scColor};font-weight:700">${sc}</span></td>
+        <td style="padding:4px 8px">${escapeHtml(lat)}</td>
+        <td style="padding:4px 8px">${escapeHtml(cLen)}</td>
+        <td style="color:${errType !== 'ok' ? 'var(--red)' : 'var(--text-muted)'};padding:4px 8px">${escapeHtml(errType)}</td>
+      </tr>
+    `;
+  }).join('');
+
+  tbody.innerHTML = rows;
+}
+
 async function loadHuntingData() {
   try {
     const res = await fetch('/hunting/data');
@@ -3276,6 +3446,7 @@ async function loadHuntingData() {
         </tr>
       `;
     }).join('');
+    executeSiemQuery();
     await updateWAFBadge();
   } catch (e) {
     const tbody = document.getElementById('hunting-profiles-tbody');
@@ -3809,6 +3980,21 @@ def hunting_data():
         return jsonify({"ok": False, "error": str(e), "ip_profiles": []})
 
 
+@app.post("/hunting/query")
+def hunting_query_proxy():
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        res = requests.post(f"{SOC_URL}/hunting/query", json=data, timeout=3)
+        return jsonify(res.json())
+    except Exception:
+        # Fallback local SIEM evaluation
+        query_str = data.get("query", "")
+        events = _read_events(limit=500)
+        result = filter_and_aggregate_events(events, query_str)
+        result["ok"] = True
+        return jsonify(result)
+
+
 @app.post("/hunting/backtest")
 def hunting_backtest_proxy():
     try:
@@ -3826,6 +4012,7 @@ def hunting_policy_deploy():
     for k in ["min_events_per_ip", "high_fail_rate_threshold", "timing_stddev_threshold_ms", "bimodality_threshold"]:
         if k in data:
             rules[k] = data[k]
+    rules["enabled"] = True
     _write_rules(rules)
 
     waf_policy = {
