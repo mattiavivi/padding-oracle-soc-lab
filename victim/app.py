@@ -106,13 +106,16 @@ def _record_waf_outcome(ip: str, is_error: bool) -> None:
 
 
 def _client_ip() -> str:
-    client_id = request.headers.get("X-Client-ID") or request.headers.get("X-Client-Role")
-    if client_id:
-        return client_id.strip()
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
-    return request.remote_addr or "unknown"
+    remote = request.remote_addr
+    if remote and remote not in ("127.0.0.1", "localhost", "::1", ""):
+        return remote.strip()
+    client_id = request.headers.get("X-Client-ID") or request.headers.get("X-Client-Role")
+    if client_id:
+        return client_id.strip()
+    return remote or "127.0.0.1"
 
 
 def _log_request(
@@ -149,8 +152,87 @@ def _log_request(
 
 
 @app.get("/health")
+@app.get("/api/v1/health")
 def health():
     return jsonify({"status": "ok", "mode": MODE, "waf_enabled": WAF_POLICY.get("enabled", False)})
+
+
+@app.post("/api/v1/auth/login")
+def auth_login():
+    start = time.perf_counter()
+    ip = _client_ip()
+    body = request.get_json(force=True, silent=True) or {}
+    username = body.get("username", "")
+    password = body.get("password", "")
+
+    # Physiological error simulation for bad credentials
+    if not username or password == "invalid_pass":
+        latency_ms = (time.perf_counter() - start) * 1000
+        _log_request("/api/v1/auth/login", 401, latency_ms, 0, "unauthorized", {"reason": "invalid_credentials"})
+        return jsonify({"error": "unauthorized", "message": "Invalid username or password"}), 401
+
+    session_token = b64e(encrypt_token(f"session:{username}:{int(time.time())}".encode("utf-8")))
+    latency_ms = (time.perf_counter() - start) * 1000
+    _log_request("/api/v1/auth/login", 200, latency_ms, len(session_token), "ok", {"username": username})
+    return jsonify({"token_type": "Bearer", "access_token": session_token, "expires_in": 3600})
+
+
+@app.get("/api/v1/user/profile")
+def user_profile():
+    start = time.perf_counter()
+    ip = _client_ip()
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        latency_ms = (time.perf_counter() - start) * 1000
+        _log_request("/api/v1/user/profile", 401, latency_ms, 0, "unauthorized", {"reason": "missing_token"})
+        return jsonify({"error": "unauthorized", "message": "Authentication required"}), 401
+
+    token_b64 = auth_header[7:].strip()
+    try:
+        token = b64d(token_b64)
+        _, outcome = verify_and_extract(token)
+        if outcome != "ok":
+            latency_ms = (time.perf_counter() - start) * 1000
+            _log_request("/api/v1/user/profile", 401, latency_ms, len(token), "token_expired")
+            return jsonify({"error": "token_expired", "message": "Session token signature invalid"}), 401
+    except Exception:
+        latency_ms = (time.perf_counter() - start) * 1000
+        _log_request("/api/v1/user/profile", 400, latency_ms, 0, "bad_token")
+        return jsonify({"error": "bad_request", "message": "Malformed authorization token"}), 400
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    _log_request("/api/v1/user/profile", 200, latency_ms, 0, "ok")
+    return jsonify({
+        "user_id": f"usr-{ip.replace('.', '')[-4:]}",
+        "roles": ["standard_user", "crypto_client"],
+        "algorithm": "AES-128-CBC",
+        "key_version": "v1.2",
+    })
+
+
+@app.post("/api/v1/token/verify")
+def token_verify():
+    start = time.perf_counter()
+    body = request.get_json(force=True, silent=True) or {}
+    token_b64 = body.get("token")
+    if not isinstance(token_b64, str):
+        latency_ms = (time.perf_counter() - start) * 1000
+        _log_request("/api/v1/token/verify", 400, latency_ms, 0, "bad_request")
+        return jsonify({"valid": False, "reason": "missing_token"}), 400
+
+    try:
+        token = b64d(token_b64)
+        _, outcome = verify_and_extract(token)
+        is_valid = (outcome == "ok")
+        status = 200 if is_valid else 400
+        err_type = "ok" if is_valid else "verification_failed"
+        latency_ms = (time.perf_counter() - start) * 1000
+        _log_request("/api/v1/token/verify", status, latency_ms, len(token), err_type)
+        return jsonify({"valid": is_valid, "outcome": outcome}), status
+    except Exception:
+        latency_ms = (time.perf_counter() - start) * 1000
+        _log_request("/api/v1/token/verify", 400, latency_ms, 0, "bad_b64")
+        return jsonify({"valid": False, "reason": "invalid_base64"}), 400
 
 
 @app.get("/waf/status")
@@ -172,7 +254,6 @@ def waf_set_policy():
     return jsonify({"ok": True, "policy": WAF_POLICY})
 
 
-
 @app.post("/waf/reset")
 def waf_reset():
     WAF_BLOCKED_IPS.clear()
@@ -187,6 +268,7 @@ def sample_token():
 
 
 @app.post("/encrypt")
+@app.post("/api/v1/crypto/encrypt")
 def encrypt():
     body = request.get_json(force=True, silent=True) or {}
     plaintext = str(body.get("plaintext", "hello")).encode("utf-8")
@@ -195,6 +277,7 @@ def encrypt():
 
 
 @app.post("/decrypt")
+@app.post("/api/v1/crypto/decrypt")
 def decrypt():
     start = time.perf_counter()
     ip = _client_ip()
