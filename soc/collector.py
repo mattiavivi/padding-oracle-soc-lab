@@ -9,6 +9,7 @@ from glob import glob
 
 from flask import Flask, jsonify, request
 
+from common.siem_query import filter_and_aggregate_events
 
 
 app = Flask(__name__)
@@ -22,6 +23,7 @@ ALERT_RULES_FILE = os.getenv(
 
 def _load_rules() -> dict:
     defaults = {
+        "enabled": False,
         "min_events_per_ip": 25,
         "high_fail_rate_threshold": 0.85,
         "collector_window_minutes": 15,
@@ -141,9 +143,48 @@ def _calc_latency_stats(latencies: list[float]) -> dict:
     }
 
 
-def _build_alerts(events: list[dict]) -> list[dict]:
-    rules = _load_rules()
+def _build_alerts(events: list[dict], custom_rules: dict | None = None) -> list[dict]:
+    if custom_rules is not None:
+        rules = _load_rules()
+        rules.update(custom_rules)
+        if "enabled" not in custom_rules:
+            rules["enabled"] = True
+    else:
+        rules = _load_rules()
+
     alerts = []
+
+    # WAF Preventive Block Events (always captured if present)
+    waf_events = [
+        e for e in events
+        if e.get("service") == "victim" and (e.get("status_code") == 429 or e.get("error_type") == "waf_blocked")
+    ]
+    if waf_events:
+        waf_ips = {e.get("src_ip", "unknown") for e in waf_events}
+        for ip in sorted(waf_ips):
+            ip_waf_evs = [e for e in waf_events if e.get("src_ip") == ip]
+            alerts.append(
+                {
+                    "rule": "waf_padding_oracle_blocked",
+                    "title": "🛡️ Inline WAF: Active Exploit Neutralized (HTTP 429)",
+                    "severity": "critical",
+                    "ip": ip,
+                    "confidence": 1.0,
+                    "mitre_technique": "T1110.001 - Brute Force (Mitigated by WAF)",
+                    "evidence": {
+                        "blocked_requests": len(ip_waf_evs),
+                        "action": "HTTP 429 Preventive Drop before AES-CBC Decrypt Engine",
+                        "attack_neutralized": True,
+                    },
+                    "recommended_action": "Mantieni quarantena IP o applica ban permanente L7",
+                    "timestamp": ip_waf_evs[-1].get("ts", datetime.now(timezone.utc).isoformat()),
+                }
+            )
+
+    # If detection rules are disabled, do not generate proactive detection alerts
+    if not rules.get("enabled", False):
+        return alerts
+
     per_ip = defaultdict(list)
     decrypt_events = [
         e for e in events if e.get("service") == "victim" and e.get("endpoint") == "/decrypt"
@@ -441,6 +482,20 @@ def hunting_explore():
         "ip_profiles": ip_profiles,
         "active_rules": rules,
     })
+
+
+@app.post("/hunting/query")
+def hunting_query():
+    """Filtra i log grezzi secondo la query SIEM (Lucene/KQL-like) e restituisce aggregazioni."""
+    data = request.get_json(force=True, silent=True) or {}
+    query_str = data.get("query", "")
+    rules = _load_rules()
+    window_minutes = int(data.get("window_minutes", rules.get("collector_window_minutes", WINDOW_MINUTES)))
+    events = _windowed_events(_read_events(), window_minutes)
+    result = filter_and_aggregate_events(events, query_str)
+    result["ok"] = True
+    result["window_minutes"] = window_minutes
+    return jsonify(result)
 
 
 @app.post("/hunting/backtest")

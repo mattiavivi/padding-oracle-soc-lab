@@ -12,6 +12,24 @@ class TestSocDetectionEngine(unittest.TestCase):
         self.assertGreater(stats["stddev"], 10.0)
         self.assertGreater(stats["p95_p50_diff"], 20.0)
 
+    def test_default_zero_alerts_when_rules_disabled(self):
+        # 30 attack events with default disabled rules -> 0 alerts (clean slate)
+        events = []
+        now = datetime.now(timezone.utc)
+        for i in range(30):
+            events.append({
+                "ts": (now - timedelta(seconds=30 - i)).isoformat(),
+                "service": "victim",
+                "endpoint": "/decrypt",
+                "src_ip": "attacker",
+                "status_code": 500 if i < 28 else 200,
+                "error_type": "padding_error" if i < 28 else "ok",
+                "ciphertext_len": 48,
+                "latency_ms": 2.5,
+            })
+        alerts = _build_alerts(events, custom_rules={"enabled": False})
+        self.assertEqual(len(alerts), 0, "No alerts should be triggered when rules are disabled")
+
     def test_error_rate_padding_oracle_detection(self):
         # 30 events with 28 padding errors from attacker IP
         events = []
@@ -28,7 +46,7 @@ class TestSocDetectionEngine(unittest.TestCase):
                 "latency_ms": 2.5,
             })
 
-        alerts = _build_alerts(events)
+        alerts = _build_alerts(events, custom_rules={"enabled": True, "min_events_per_ip": 15})
         self.assertTrue(any(a["rule"] == "high_fail_rate_padding_oracle" for a in alerts))
         self.assertTrue(any(a["severity"] == "critical" for a in alerts))
 
@@ -49,10 +67,28 @@ class TestSocDetectionEngine(unittest.TestCase):
                 "latency_ms": lat,
             })
 
-        alerts = _build_alerts(events)
+        alerts = _build_alerts(events, custom_rules={"enabled": True, "min_timing_events_per_ip": 20})
         self.assertTrue(any(a["rule"] == "timing_side_channel_oracle" for a in alerts))
         self.assertEqual(alerts[0]["severity"], "high")
         self.assertIn("T1595.002", alerts[0]["mitre_technique"])
+
+    def test_waf_blocked_alert_generation(self):
+        now = datetime.now(timezone.utc)
+        events = [
+            {
+                "ts": now.isoformat(),
+                "service": "victim",
+                "endpoint": "/decrypt",
+                "src_ip": "attacker",
+                "status_code": 429,
+                "error_type": "waf_blocked",
+                "latency_ms": 0.5,
+                "ciphertext_len": 0,
+            }
+        ]
+        alerts = _build_alerts(events)
+        self.assertTrue(any(a["rule"] == "waf_padding_oracle_blocked" for a in alerts))
+        self.assertEqual(alerts[0]["severity"], "critical")
 
     def test_benign_traffic_no_false_positives(self):
         # 50 benign requests (status 200, latency ~2ms)

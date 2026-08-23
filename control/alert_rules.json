@@ -1,10 +1,11 @@
 {
-  "bimodality_threshold": 0.555,
-  "block_probing_min_consecutive_errors": 15,
-  "collector_window_minutes": 15,
-  "high_fail_rate_threshold": 0.8,
+  "enabled": false,
   "min_events_per_ip": 15,
-  "min_timing_events_per_ip": 20,
+  "high_fail_rate_threshold": 0.8,
+  "collector_window_minutes": 15,
+  "timing_stddev_threshold_ms": 6.0,
   "timing_p95_p50_diff_threshold_ms": 12.0,
-  "timing_stddev_threshold_ms": 6
+  "bimodality_threshold": 0.555,
+  "min_timing_events_per_ip": 20,
+  "block_probing_min_consecutive_errors": 15
 }
