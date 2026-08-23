@@ -1952,7 +1952,10 @@ MAIN_PAGE = r"""<!doctype html>
         <!-- 2. Raw Telemetry Actor Profiles -->
         <div class="card" style="margin:0 0 16px 0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-            <h3 style="margin:0;font-size:14px;color:#fff">2. Telemetria Grezza: Profilazione Attori &amp; Feature Crittografiche</h3>
+            <div>
+              <h3 style="margin:0;font-size:14px;color:#fff">2. Telemetria Grezza: Profilazione Attori &amp; Feature Crittografiche</h3>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:2px">Clicca su una metrica o premi "Adotta Valori IP" per calibrare istantaneamente le soglie di detection.</div>
+            </div>
             <button class="btn btn-secondary" style="font-size:11px;padding:3px 8px" onclick="loadHuntingData()">🔄 Aggiorna Profili</button>
           </div>
           <div style="overflow-x:auto">
@@ -1963,9 +1966,9 @@ MAIN_PAGE = r"""<!doctype html>
                   <th>Richieste Decrypt</th>
                   <th>Errori (Fail Rate)</th>
                   <th>Blocco Target</th>
-                  <th>Latenza Media</th>
-                  <th>Sarle's BC (Bimodalità)</th>
-                  <th>Classificazione</th>
+                  <th>Latenza Media / StdDev</th>
+                  <th>Bimodalità (Sarle BC)</th>
+                  <th>Classificazione &amp; Calibrazione</th>
                 </tr>
               </thead>
               <tbody id="hunting-profiles-tbody">
@@ -1999,20 +2002,36 @@ MAIN_PAGE = r"""<!doctype html>
               <label class="form-label" style="font-size:11px;color:var(--text-dim)">⚙️ Parametri Soglia &amp; Finestra Temporale:</label>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px">
                 <div class="form-group" style="margin-bottom:6px">
-                  <label class="form-label" style="font-size:10px">Min Richieste / Finestra</label>
+                  <label class="form-label" style="font-size:10px;display:flex;justify-content:space-between">
+                    <span>Min Richieste / 60s</span>
+                    <span style="color:var(--text-dim)">Volume</span>
+                  </label>
                   <input class="form-input" type="number" id="hunt-min-events" value="15" min="5" max="100" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                  <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Soglia burst IP (Normali: 1-2 req, Atk: &gt;100 req)</div>
                 </div>
                 <div class="form-group" style="margin-bottom:6px">
-                  <label class="form-label" style="font-size:10px">Soglia Fail-Rate (0-1)</label>
+                  <label class="form-label" style="font-size:10px;display:flex;justify-content:space-between">
+                    <span>Soglia Fail-Rate (0-1)</span>
+                    <span style="color:var(--text-dim)">Errori %</span>
+                  </label>
                   <input class="form-input" type="number" id="hunt-fail-rate" value="0.80" min="0.1" max="1.0" step="0.05" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                  <div style="font-size:9px;color:var(--text-muted);margin-top:2px">% Errori 500/403 (Normali: ~2%, Atk: ~99.6%)</div>
                 </div>
                 <div class="form-group" style="margin-bottom:6px">
-                  <label class="form-label" style="font-size:10px">Timing StdDev (ms)</label>
+                  <label class="form-label" style="font-size:10px;display:flex;justify-content:space-between">
+                    <span>Timing StdDev (ms)</span>
+                    <span style="color:var(--text-dim)">Varianza</span>
+                  </label>
                   <input class="form-input" type="number" id="hunt-timing-stddev" value="6.0" min="1.0" max="30.0" step="0.5" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                  <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Dispersione latenza (Normali: &lt;1.5ms, Timing: &gt;10ms)</div>
                 </div>
                 <div class="form-group" style="margin-bottom:6px">
-                  <label class="form-label" style="font-size:10px">Bimodalità Sarle (BC)</label>
+                  <label class="form-label" style="font-size:10px;display:flex;justify-content:space-between">
+                    <span>Bimodalità Sarle (BC)</span>
+                    <span style="color:var(--text-dim)">Side-Channel</span>
+                  </label>
                   <input class="form-input" type="number" id="hunt-bimodality" value="0.555" min="0.3" max="0.99" step="0.05" onchange="runHuntingBacktest()" style="font-size:11px;padding:4px 8px">
+                  <div style="font-size:9px;color:var(--text-muted);margin-top:2px">Firma a doppio picco (&gt;0.555 = Timing Leak)</div>
                 </div>
               </div>
               <div style="display:flex;gap:8px;flex-direction:column">
@@ -3705,18 +3724,45 @@ async function loadHuntingData() {
       const badgeStyle = isSuspect ? 'background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.3)' : 'background:rgba(16,185,129,0.15);color:var(--green);border:1px solid rgba(16,185,129,0.3)';
       const badgeLabel = isSuspect ? '🔴 Sospetto Attaccante' : '🟢 Traffico Benigno';
       const lats = p.latency_stats || {};
+      const stdNum = lats.stddev || 0;
+      const bcNum = lats.bimodality_coefficient || 0;
       const bcStr = lats.bimodality_coefficient !== undefined ? `${lats.bimodality_coefficient} ${lats.is_bimodal ? '⚠️ (Bimodale)' : ''}` : '—';
       const blkStr = p.sample_ciphertext_len ? `${p.sample_ciphertext_len}B (${p.is_aes_aligned ? 'AES' : 'No'})` : '—';
 
       return `
         <tr>
           <td><strong style="color:#fff">${escapeHtml(p.ip)}</strong></td>
-          <td>${p.decrypt_requests}</td>
-          <td><strong style="color:${p.fail_rate > 0.5 ? 'var(--red)' : 'var(--green)'}">${(p.fail_rate * 100).toFixed(1)}%</strong> (${p.failed_decrypts} err)</td>
+          <td>
+            <a href="javascript:void(0)" style="color:var(--accent);text-decoration:underline;font-weight:600" title="Imposta Min Richieste a ${p.decrypt_requests}" onclick="setSingleThreshold('events', ${p.decrypt_requests})">
+              ${p.decrypt_requests} req ↗
+            </a>
+          </td>
+          <td>
+            <a href="javascript:void(0)" style="color:${p.fail_rate > 0.5 ? 'var(--red)' : 'var(--green)'};text-decoration:underline;font-weight:700" title="Imposta Soglia Fail-Rate a ${(p.fail_rate * 100).toFixed(0)}%" onclick="setSingleThreshold('fail', ${p.fail_rate})">
+              ${(p.fail_rate * 100).toFixed(1)}% ↗
+            </a>
+            <span style="font-size:10px;color:var(--text-dim)">(${p.failed_decrypts} err)</span>
+          </td>
           <td>${blkStr}</td>
-          <td>${lats.mean || 0} ms (±${lats.stddev || 0}ms)</td>
-          <td><span style="font-family:var(--font-mono)">${bcStr}</span></td>
-          <td><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;${badgeStyle}">${badgeLabel}</span></td>
+          <td>
+            ${lats.mean || 0} ms 
+            <a href="javascript:void(0)" style="color:var(--amber);text-decoration:underline;font-size:11px;margin-left:4px" title="Imposta Soglia StdDev a ${stdNum} ms" onclick="setSingleThreshold('timing', ${stdNum})">
+              (±${stdNum}ms ↗)
+            </a>
+          </td>
+          <td>
+            <a href="javascript:void(0)" style="font-family:var(--font-mono);color:#c084fc;text-decoration:underline" title="Imposta Soglia Bimodalità" onclick="setSingleThreshold('bc', ${bcNum || 0.555})">
+              ${bcStr} ↗
+            </a>
+          </td>
+          <td>
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+              <span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;${badgeStyle}">${badgeLabel}</span>
+              <button class="btn btn-primary" style="font-size:10px;padding:2px 8px;white-space:nowrap" title="Calibra tutte le soglie dai dati di questo IP" onclick="applyActorAsThresholds(${p.decrypt_requests}, ${p.fail_rate}, ${stdNum}, ${bcNum})">
+                🎯 Adotta Valori IP
+              </button>
+            </div>
+          </td>
         </tr>
       `;
     }).join('');
@@ -3726,6 +3772,51 @@ async function loadHuntingData() {
     const tbody = document.getElementById('hunting-profiles-tbody');
     if (tbody) tbody.innerHTML = `<tr><td colspan="7" style="color:var(--red)">Errore caricamento: ${escapeHtml(e.message)}</td></tr>`;
   }
+}
+
+function setSingleThreshold(type, value) {
+  if (type === 'fail') {
+    const v = Math.max(0.10, Math.min(0.95, value > 0.4 ? Math.max(0.5, value - 0.1) : value));
+    const input = document.getElementById('hunt-fail-rate');
+    if (input) input.value = v.toFixed(2);
+  } else if (type === 'events') {
+    const v = Math.max(5, Math.floor(value > 10 ? value * 0.7 : value));
+    const input = document.getElementById('hunt-min-events');
+    if (input) input.value = v;
+  } else if (type === 'timing') {
+    const v = Math.max(2.0, Math.min(25.0, value > 3.0 ? value * 0.75 : value));
+    const input = document.getElementById('hunt-timing-stddev');
+    if (input) input.value = v.toFixed(1);
+  } else if (type === 'bc') {
+    const input = document.getElementById('hunt-bimodality');
+    if (input) input.value = '0.555';
+  }
+  runHuntingBacktest();
+  document.getElementById('sigma-rule-output')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function applyActorAsThresholds(reqs, failRate, stddev, bc) {
+  if (failRate > 0.40) {
+    const calibratedFail = Math.max(0.50, Math.min(0.95, Math.floor((failRate - 0.10) * 20) / 20));
+    const failInput = document.getElementById('hunt-fail-rate');
+    if (failInput) failInput.value = calibratedFail.toFixed(2);
+  }
+  if (reqs > 10) {
+    const calibratedReqs = Math.max(10, Math.min(50, Math.floor(reqs * 0.6)));
+    const reqsInput = document.getElementById('hunt-min-events');
+    if (reqsInput) reqsInput.value = calibratedReqs;
+  }
+  if (stddev > 4.0) {
+    const calibratedStd = Math.max(3.0, parseFloat((stddev * 0.7).toFixed(1)));
+    const stdInput = document.getElementById('hunt-timing-stddev');
+    if (stdInput) stdInput.value = calibratedStd;
+  }
+  if (bc > 0.50) {
+    const bcInput = document.getElementById('hunt-bimodality');
+    if (bcInput) bcInput.value = '0.555';
+  }
+  runHuntingBacktest();
+  document.getElementById('sigma-rule-output')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 async function runHuntingBacktest() {
