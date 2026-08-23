@@ -1,10 +1,12 @@
+import csv
+import io
 import json
 import os
 import signal
 import threading
 import time
 import uuid
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import secrets
@@ -13,7 +15,7 @@ import string
 import docker
 import requests
 from docker.errors import APIError, NotFound
-from flask import Flask, jsonify, redirect, render_template_string, request, url_for
+from flask import Flask, jsonify, redirect, render_template_string, request, url_for, Response
 
 from common.siem_query import filter_and_aggregate_events
 
@@ -324,76 +326,156 @@ def _handle_shutdown_signal(signum, _frame) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Log helpers
+# In-Memory Ring Buffer (10,000 Capacity) & Incremental Ingestion
 # ---------------------------------------------------------------------------
 
-def _tail_lines(path: Path, max_lines: int = 2000) -> list[str]:
-    """Efficiently read up to max_lines from the end of a log file without reading the whole file."""
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            if size == 0:
-                return []
-            buffer_size = 8192
-            lines: list[str] = []
-            remainder = b""
-            offset = size
-            while offset > 0 and len(lines) < max_lines:
-                read_size = min(buffer_size, offset)
-                offset -= read_size
-                f.seek(offset)
-                chunk = f.read(read_size) + remainder
-                split = chunk.split(b"\n")
-                remainder = split[0]
-                for l in reversed(split[1:]):
-                    l_str = l.strip()
-                    if l_str:
-                        lines.append(l_str.decode("utf-8", errors="ignore"))
-                        if len(lines) >= max_lines:
-                            break
-            if remainder.strip() and len(lines) < max_lines:
-                lines.append(remainder.strip().decode("utf-8", errors="ignore"))
-            return list(reversed(lines))
-    except Exception:
-        return []
+MAX_MEMORY_LOGS = int(os.getenv("MAX_LOGS_MEMORY", "10000"))
+_MEMORY_LOG_BUFFER: deque = deque(maxlen=MAX_MEMORY_LOGS)
+_FILE_BYTE_OFFSETS: dict[str, int] = {}
+_LOG_SYNC_LOCK = threading.Lock()
+
+
+def _clear_jsonl_logs() -> list[str]:
+    cleared = []
+    with _LOG_SYNC_LOCK:
+        _MEMORY_LOG_BUFFER.clear()
+        _FILE_BYTE_OFFSETS.clear()
+    for path in sorted(LOG_DIR.glob("*.jsonl")):
+        try:
+            path.write_text("", encoding="utf-8")
+            cleared.append(path.name)
+        except (IOError, OSError):
+            continue
+    return cleared
+
+
+def _sync_memory_logs() -> None:
+    """Incrementally ingests newly appended lines from *.jsonl files into the in-memory ring buffer."""
+    with _LOG_SYNC_LOCK:
+        new_events = []
+        for path in sorted(LOG_DIR.glob("*.jsonl")):
+            path_str = str(path)
+            last_offset = _FILE_BYTE_OFFSETS.get(path_str, 0)
+            try:
+                if not path.exists():
+                    continue
+                size = path.stat().st_size
+                if size < last_offset:
+                    # File was truncated/cleared
+                    last_offset = 0
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(last_offset)
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                            new_events.append(ev)
+                        except json.JSONDecodeError:
+                            continue
+                    _FILE_BYTE_OFFSETS[path_str] = f.tell()
+            except Exception:
+                continue
+        if new_events:
+            for ev in new_events:
+                _MEMORY_LOG_BUFFER.append(ev)
 
 
 def _read_events(limit: int = 1000, service: str | None = None, q: str | None = None) -> list[dict]:
-    events: list[dict] = []
-    max_to_fetch = max(limit * 2, 2000) if limit > 0 else 50000
-    for path in sorted(LOG_DIR.glob("*.jsonl")):
-        lines = _tail_lines(path, max_lines=max_to_fetch)
-        for line in lines:
-            try:
-                ev = json.loads(line)
-            except json.JSONDecodeError:
+    _sync_memory_logs()
+    with _LOG_SYNC_LOCK:
+        events = list(_MEMORY_LOG_BUFFER)
+
+    filtered = []
+    for ev in events:
+        if service:
+            svc_str = str(ev.get("service", ""))
+            etype_str = str(ev.get("event_type", ""))
+            if service == "benign":
+                is_match = svc_str.startswith("benign") or "benign" in svc_str
+            elif service == "attacker":
+                is_match = svc_str == "attacker" or svc_str.startswith("attacker") or etype_str.startswith("attack")
+            elif service == "victim":
+                is_match = svc_str.startswith("victim")
+            else:
+                is_match = svc_str == service or svc_str.startswith(service)
+            if not is_match:
                 continue
-            if service:
-                svc_str = str(ev.get("service", ""))
-                etype_str = str(ev.get("event_type", ""))
-                if service == "benign":
-                    is_match = svc_str.startswith("benign") or "benign" in svc_str
-                elif service == "attacker":
-                    is_match = svc_str == "attacker" or svc_str.startswith("attacker") or etype_str.startswith("attack")
-                elif service == "victim":
-                    is_match = svc_str.startswith("victim")
-                else:
-                    is_match = svc_str == service or svc_str.startswith(service)
-                if not is_match:
-                    continue
-            if q:
-                blob = json.dumps(ev, sort_keys=True)
-                if q.lower() not in blob.lower():
-                    continue
-            events.append(ev)
-    # Sort by timestamp so the tail is genuinely chronological across all files
+        if q:
+            blob = json.dumps(ev, sort_keys=True)
+            if q.lower() not in blob.lower():
+                continue
+        filtered.append(ev)
+
+    def _ts_key(ev: dict) -> str:
+        return str(ev.get("ts", "") or "")
+    filtered.sort(key=_ts_key)
+    if limit <= 0 or limit >= len(filtered):
+        return list(reversed(filtered))
+    return list(reversed(filtered[-limit:]))
+
+
+@app.get("/logs/export/csv")
+def logs_export_csv():
+    """Export all in-memory raw logs as a downloadable CSV file."""
+    _sync_memory_logs()
+    with _LOG_SYNC_LOCK:
+        events = list(_MEMORY_LOG_BUFFER)
+
     def _ts_key(ev: dict) -> str:
         return str(ev.get("ts", "") or "")
     events.sort(key=_ts_key)
-    if limit <= 0 or limit >= len(events):
-        return list(reversed(events))
-    return list(reversed(events[-limit:]))
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "timestamp", "service", "event_type", "src_ip", "endpoint",
+        "status_code", "latency_ms", "ciphertext_len", "error_type",
+        "scenario_id", "details_json"
+    ])
+    for e in events:
+        details_str = json.dumps(e.get("details", {})) if e.get("details") else ""
+        writer.writerow([
+            e.get("ts", ""),
+            e.get("service", ""),
+            e.get("event_type", ""),
+            e.get("src_ip", ""),
+            e.get("endpoint", ""),
+            e.get("status_code", ""),
+            e.get("latency_ms", ""),
+            e.get("ciphertext_len", ""),
+            e.get("error_type", ""),
+            e.get("scenario_id", ""),
+            details_str,
+        ])
+
+    filename = f"soc_raw_logs_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+@app.get("/logs/export/jsonl")
+def logs_export_jsonl():
+    """Export all in-memory raw logs as a downloadable JSONL file."""
+    _sync_memory_logs()
+    with _LOG_SYNC_LOCK:
+        events = list(_MEMORY_LOG_BUFFER)
+
+    def _ts_key(ev: dict) -> str:
+        return str(ev.get("ts", "") or "")
+    events.sort(key=_ts_key)
+
+    lines = [json.dumps(e) for e in events]
+    filename = f"soc_raw_logs_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.jsonl"
+    return Response(
+        "\n".join(lines) + ("\n" if lines else ""),
+        mimetype="application/x-ndjson",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 
 def _is_attack_active(window_seconds: int = 30) -> bool:
@@ -1579,7 +1661,7 @@ MAIN_PAGE = r"""<!doctype html>
           </div>
           <div class="subtab-content" id="subtab-content-raw">
             <div style="padding:8px 14px;border-bottom:1px solid var(--border);background:var(--bg-panel)">
-              <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
+              <div class="filter-bar" style="flex-wrap:wrap;gap:8px;align-items:center">
                 <select id="net-raw-service-filter" onchange="loadNetRawLogs()">
                   <option value="">Tutti i servizi</option>
                   <option value="victim">victim</option>
@@ -1595,6 +1677,8 @@ MAIN_PAGE = r"""<!doctype html>
                   <option value="benign_request">benign_request (client)</option>
                 </select>
                 <input id="net-raw-q" type="text" placeholder="Cerca testo libero…" oninput="loadNetRawLogs()" style="flex:1;min-width:140px">
+                <a href="/logs/export/csv" class="btn btn-primary" style="font-size:11px;padding:4px 10px;text-decoration:none;display:inline-flex;align-items:center;gap:4px">📥 CSV</a>
+                <a href="/logs/export/jsonl" class="btn btn-secondary" style="font-size:11px;padding:4px 10px;text-decoration:none;display:inline-flex;align-items:center;gap:4px">📄 JSONL</a>
               </div>
             </div>
             <div class="log-stream-wrap" id="net-raw-stream"></div>
@@ -1623,7 +1707,9 @@ MAIN_PAGE = r"""<!doctype html>
             <span style="font-size:11px;color:var(--text-dim);background:rgba(255,255,255,0.05);padding:2px 8px;border-radius:4px;font-family:var(--font-mono)">Attacker &amp; Benign vs Victim Server</span>
           </div>
           <div style="flex:1"></div>
-          <label style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;cursor:pointer">
+          <a href="/logs/export/csv" class="btn btn-primary" style="font-size:11px;padding:4px 10px;text-decoration:none;display:inline-flex;align-items:center;gap:4px">📥 Scarica CSV</a>
+          <a href="/logs/export/jsonl" class="btn btn-secondary" style="font-size:11px;padding:4px 10px;text-decoration:none;display:inline-flex;align-items:center;gap:4px;margin-left:4px">📄 Scarica JSONL</a>
+          <label style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:6px;cursor:pointer;margin-left:10px">
             <input type="checkbox" id="soc-auto-scroll" checked style="accent-color:var(--accent)"> Auto-scroll
           </label>
           <button class="btn btn-secondary" style="font-size:11px;padding:4px 10px;margin-left:8px" onclick="loadSocLogs()">↻ Aggiorna</button>
@@ -1635,7 +1721,7 @@ MAIN_PAGE = r"""<!doctype html>
       <!-- ── Log Raw ── -->
       <div id="panel-log-raw" class="panel">
         <div style="padding:12px 20px;border-bottom:1px solid var(--border);background:var(--bg-panel)">
-          <div class="filter-bar" style="flex-wrap:wrap;gap:8px">
+          <div class="filter-bar" style="flex-wrap:wrap;gap:8px;align-items:center">
             <select id="raw-service-filter" onchange="loadRawLogs()">
               <option value="">Tutti i servizi</option>
               <option value="victim">victim</option>
@@ -1658,8 +1744,10 @@ MAIN_PAGE = r"""<!doctype html>
               <option value="2000">2.000 righe</option>
               <option value="5000">5.000 righe</option>
               <option value="10000">10.000 righe</option>
-              <option value="0">Tutti i log (Illimitato)</option>
+              <option value="0">Tutti i log (In RAM: 10k max)</option>
             </select>
+            <a href="/logs/export/csv" class="btn btn-primary" style="font-size:11px;padding:5px 12px;text-decoration:none;display:inline-flex;align-items:center;gap:4px">📥 Scarica CSV</a>
+            <a href="/logs/export/jsonl" class="btn btn-secondary" style="font-size:11px;padding:5px 12px;text-decoration:none;display:inline-flex;align-items:center;gap:4px">📄 Scarica JSONL</a>
           </div>
         </div>
         <div class="log-stream-wrap" id="log-raw-stream"></div>

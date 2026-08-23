@@ -2,8 +2,9 @@ import json
 import math
 import os
 import statistics
+import threading
 import uuid
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from glob import glob
 
@@ -19,6 +20,11 @@ ALERT_RULES_FILE = os.getenv(
     "ALERT_RULES_FILE",
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "control", "alert_rules.json"),
 )
+
+MAX_MEMORY_LOGS = int(os.getenv("MAX_LOGS_MEMORY", "10000"))
+_MEMORY_LOG_BUFFER: deque = deque(maxlen=MAX_MEMORY_LOGS)
+_FILE_BYTE_OFFSETS: dict[str, int] = {}
+_LOG_SYNC_LOCK = threading.Lock()
 
 
 def _load_rules() -> dict:
@@ -44,22 +50,40 @@ def _load_rules() -> dict:
     return defaults
 
 
+def _sync_collector_memory_logs() -> None:
+    with _LOG_SYNC_LOCK:
+        new_events = []
+        for path in sorted(glob(os.path.join(LOG_DIR, "*.jsonl"))):
+            last_offset = _FILE_BYTE_OFFSETS.get(path, 0)
+            try:
+                if not os.path.exists(path):
+                    continue
+                size = os.path.getsize(path)
+                if size < last_offset:
+                    last_offset = 0
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    f.seek(last_offset)
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                            new_events.append(ev)
+                        except json.JSONDecodeError:
+                            continue
+                    _FILE_BYTE_OFFSETS[path] = f.tell()
+            except Exception:
+                continue
+        if new_events:
+            for ev in new_events:
+                _MEMORY_LOG_BUFFER.append(ev)
+
+
 def _read_events() -> list[dict]:
-    events = []
-    for path in sorted(glob(os.path.join(LOG_DIR, "*.jsonl"))):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        events.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-        except Exception:
-            continue
-    return events
+    _sync_collector_memory_logs()
+    with _LOG_SYNC_LOCK:
+        return list(_MEMORY_LOG_BUFFER)
 
 
 def _windowed_events(events: list[dict], window_minutes: int) -> list[dict]:
