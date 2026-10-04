@@ -1,10 +1,60 @@
 {
+  "bimodality_threshold": 0.555,
   "block_probing_min_consecutive_errors": 15,
   "collector_window_minutes": 15,
   "enabled": false,
-  "high_fail_rate_threshold": 0.8,
-  "min_events_per_ip": 15,
+  "high_fail_rate_threshold": 0.85,
+  "min_events_per_ip": 25,
   "min_timing_events_per_ip": 20,
+  "rule_auth_bruteforce_enabled": true,
+  "rule_byte_probing_enabled": true,
+  "rule_error_flooding_enabled": true,
+  "rule_timing_oracle_enabled": true,
+  "rules": [
+    {
+      "description": "Trigger: Fail Rate > 80% su errori espliciti (500/padding_error)",
+      "enabled": true,
+      "endpoint": "/api/v1/crypto/decrypt",
+      "fail_rate": 0.8,
+      "id": "rule_error_flooding",
+      "min_events": 15,
+      "mitre": "T1110.001",
+      "name": "AES-CBC Padding Oracle Exploit (Error Flooding)",
+      "rule_type": "error_flooding"
+    },
+    {
+      "bimodality": 0.555,
+      "description": "Trigger: StdDev latenza > 6ms o Bimodalit\u00e0 Sarle > 0.555",
+      "enabled": true,
+      "endpoint": "/api/v1/crypto/decrypt",
+      "id": "rule_timing_oracle",
+      "mitre": "T1595.002",
+      "name": "Cryptographic Timing Side-Channel Oracle Detected",
+      "rule_type": "timing_oracle",
+      "timing_stddev": 6.0
+    },
+    {
+      "consecutive_errors": 12,
+      "description": "Trigger: Scansione sequenziale 16-byte blocks con errori consecutivi",
+      "enabled": true,
+      "endpoint": "/api/v1/crypto/decrypt",
+      "id": "rule_byte_probing",
+      "mitre": "T1040",
+      "name": "Sequential CBC Block Byte-Probing Pattern",
+      "rule_type": "byte_probing"
+    },
+    {
+      "description": "Trigger: Fail Rate > 80% su tentativi di autenticazione falliti (HTTP 401)",
+      "enabled": true,
+      "endpoint": "/api/v1/auth/login",
+      "fail_rate": 0.8,
+      "id": "rule_auth_bruteforce",
+      "min_events": 5,
+      "mitre": "T1110.001",
+      "name": "Authentication Brute-Force & Credential Spraying",
+      "rule_type": "error_flooding"
+    }
+  ],
   "timing_p95_p50_diff_threshold_ms": 12.0,
   "timing_stddev_threshold_ms": 6.0
 }

@@ -18,7 +18,12 @@ La dashboard web gira sul servizio `soc-ui`.
 - Pulsante **Reset Test**: riporta il lab su `victim-vuln`, ferma workload attacker/benign e pulisce i log.
 - All'avvio di `soc-ui`, i log JSONL vengono puliti automaticamente.
 - Visualizzazione eventi JSONL per servizio, mode e scenario.
-- Gestione soglie di alert via form.
+- Gestione soglie di alert via form e studio interattivo di Threat Hunting.
+- Configurazione avanzata regole WAF Layer 7:
+  - Scoping per endpoint API (`/api/v1/crypto/decrypt`, `/api/v1/auth/login`, `*`).
+  - Finestra temporale di sliding-window configurabile (`window_seconds`, es. 60s, 300s anti-dilatazione temporale, 600s).
+  - Soglie di burst (`min_requests_window`), fail-rate (`max_fail_rate`), errori consecutivi e quarantena dinamica (`ban_ttl_seconds`).
+  - Generazione e copia anteprima specifiche Sigma Detection Rule YAML sincronizzate con la finestra temporale.
 
 ## Avvio
 ```bash

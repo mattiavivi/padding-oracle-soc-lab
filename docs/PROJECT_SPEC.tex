@@ -1,0 +1,626 @@
+\documentclass[12pt,a4paper]{article}
+
+% ─── Pacchetti ──────────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[italian]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{hyperref}
+\usepackage{amsmath,amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{abstract}
+\usepackage{setspace}
+
+% ─── Stile pagina ────────────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textit{Padding Oracle SOC Lab}}
+\lhead{\textit{Specifiche Accademiche}}
+\cfoot{\thepage}
+
+% ─── Titoli sezione ─────────────────────────────────────────────────────────
+\titleformat{\section}{\large\bfseries}{\thesection}{1em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\itshape}{\thesubsubsection}{1em}{}
+
+% ─── Stile codice ────────────────────────────────────────────────────────────
+\definecolor{codebg}{RGB}{248,248,248}
+\definecolor{codeframe}{RGB}{200,200,200}
+\definecolor{keyword}{RGB}{0,0,180}
+\definecolor{comment}{RGB}{80,120,80}
+\definecolor{string}{RGB}{160,32,32}
+
+\lstset{
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{keyword}\bfseries,
+  commentstyle=\color{comment}\itshape,
+  stringstyle=\color{string},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=6pt,
+  breaklines=true,
+  showstringspaces=false,
+  captionpos=b,
+}
+
+% ─── Frontespizio ────────────────────────────────────────────────────────────
+\title{
+  \vspace{-1cm}
+  {\Large Corso di Sicurezza Informatica}\\[0.4cm]
+  {\rule{\linewidth}{0.5pt}}\\[0.4cm]
+  {\LARGE\bfseries Padding Oracle SOC Lab}\\[0.2cm]
+  {\large Progettazione e Implementazione di un Ambiente\\
+   Didattico per l'Analisi di Attacchi Crittografici\\
+   e il Rilevamento Automatico tramite SIEM}\\[0.4cm]
+  {\rule{\linewidth}{0.5pt}}
+}
+\author{
+  Studente: \textit{[Nome Cognome]}\\
+  Matricola: \textit{[000000]}\\[0.2cm]
+  Relatore: \textit{[Prof. Nome Cognome]}\\
+  Dipartimento di Informatica
+}
+\date{Anno Accademico 2025--2026 \\ \vspace{0.2cm} \small Commit \texttt{80982df} — branch \texttt{master}}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+\clearpage
+
+% ─── Abstract ────────────────────────────────────────────────────────────────
+\begin{abstract}
+\noindent
+Il presente documento descrive la progettazione, la motivazione teorica e l'architettura del
+\emph{Padding Oracle SOC Lab}, un ambiente containerizzato sviluppato per lo studio accademico
+degli attacchi crittografici basati su \emph{Padding Oracle} in modalità \mbox{AES-CBC} e per
+la sperimentazione di un sistema di rilevamento automatico delle intrusioni di tipo SIEM
+(\emph{Security Information and Event Management}).
+Il laboratorio consente di riprodurre in modo controllato tre scenari di esposizione — vulnerabilità
+esplicita, side-channel temporale e mitigazione completa — e di osservare in tempo reale come un
+motore di correlazione statistica sia in grado di distinguere traffico malevolo da traffico legittimo,
+calcolare metriche formali di detection e attivare risposte automatiche tramite integrazione SOAR.
+\end{abstract}
+
+\tableofcontents
+\clearpage
+
+% ===========================================================================
+\section{Introduzione e Motivazioni}
+% ===========================================================================
+
+\subsection{Contesto}
+
+La crittografia simmetrica a blocchi costituisce uno dei pilastri della sicurezza applicativa moderna.
+Algoritmi come l'\emph{Advanced Encryption Standard} (AES), standardizzato dal NIST nel 2001
+\cite{nist-aes}, sono impiegati in milioni di sistemi per proteggere sessioni, token e dati a riposo.
+Tuttavia, la correttezza di un algoritmo crittograficamente sicuro non implica necessariamente la
+sicurezza del \emph{protocollo} che lo incapsula: errori di design a livello applicativo possono
+esporre canali di informazione indiretti, noti in letteratura come \emph{oracle}.
+
+Il \textbf{Padding Oracle Attack} — formalizzato da Vaudenay nel 2002 \cite{vaudenay2002} e
+successivamente esteso da Rizzo e Duong con gli attacchi \emph{BEAST} (2011) e
+\emph{POODLE} (2014) \cite{poodle2014} — rappresenta uno degli esempi più pedagogicamente
+rilevanti di come una primitiva sicura possa essere resa vulnerabile da un contesto applicativo
+che divulga informazioni sullo stato interno del cifrario.
+
+\subsection{Obiettivi del Laboratorio}
+
+Il laboratorio si propone di raggiungere i seguenti obiettivi accademici:
+
+\begin{enumerate}[label=\textbf{O\arabic*.}]
+  \item \textbf{Comprensione teorica} della modalità CBC e del meccanismo di padding PKCS\#7,
+        con particolare attenzione alle condizioni che rendono l'oracolo sfruttabile.
+  \item \textbf{Implementazione pratica} di un exploit funzionante, capace di decifrare token
+        AES-CBC senza conoscenza della chiave segreta.
+  \item \textbf{Studio dei canali laterali} (\emph{side-channel}): come differenze di latenza
+        nell'elaborazione crittografica possono essere sfruttate anche in assenza di messaggi
+        di errore espliciti.
+  \item \textbf{Progettazione e validazione} di un motore di rilevamento SIEM basato su
+        metriche statistiche, capace di distinguere traffico di attacco da traffico benigno
+        con alta precisione e basso tasso di falsi positivi.
+  \item \textbf{Sperimentazione delle mitigazioni}: dalla correzione architetturale
+        (\emph{Encrypt-then-MAC}) alla difesa perimetrale inline (WAF con sliding-window).
+\end{enumerate}
+
+% ===========================================================================
+\section{Fondamenti Teorici: AES in Modalità CBC}
+% ===========================================================================
+
+\subsection{Block Cipher e Modalità Operative}
+
+Un \emph{block cipher} è una funzione biettiva $E_k : \{0,1\}^n \to \{0,1\}^n$ parametrizzata
+da una chiave segreta $k$. AES opera su blocchi di 128 bit ($n = 128$) con chiavi di 128, 192
+o 256 bit. Poiché i messaggi reali hanno lunghezza arbitraria, si rende necessaria una
+\emph{modalità operativa} che gestisca la cifratura di sequenze di blocchi.
+
+\subsection{Cipher Block Chaining (CBC)}
+
+La modalità \emph{Cipher Block Chaining} (CBC), definita in \cite{nist-sp800-38a}, introduce
+una dipendenza sequenziale tra i blocchi. Dati i blocchi di plaintext
+$P_1, P_2, \ldots, P_m$ e un vettore di inizializzazione casuale $IV$, la cifratura è definita da:
+
+\begin{equation}
+  C_i = E_k\!\left(P_i \oplus C_{i-1}\right), \quad C_0 = IV
+\end{equation}
+
+La corrispondente decifratura è:
+
+\begin{equation}
+  P_i = D_k(C_i) \oplus C_{i-1}
+\end{equation}
+
+dove $D_k$ è la funzione di decifratura AES con chiave $k$. Si osservi che la decifratura
+di ogni blocco è indipendente dalla chiave una volta noto $D_k(C_i)$, termine che dipende
+esclusivamente dal testo cifrato e dalla chiave — ma non dalla conoscenza esplicita di $k$
+da parte dell'attaccante.
+
+\subsection{Padding PKCS\#7}
+
+Poiché i messaggi reali raramente hanno lunghezza multipla della dimensione del blocco
+($\ell = 16$ byte per AES), è necessario un meccanismo di \emph{padding} per portare
+il plaintext alla dimensione corretta. Lo standard PKCS\#7 \cite{pkcs7} stabilisce che,
+se mancano $p$ byte all'allineamento al blocco, si aggiungono esattamente $p$ byte ciascuno
+con valore $p$:
+
+\begin{equation}
+  \text{pad}(M) = M \,\|\, \underbrace{p \,\|\, p \,\|\, \cdots \,\|\, p}_{p \text{ volte}},
+  \quad p = \ell - (|M| \bmod \ell)
+\end{equation}
+
+con $p \in \{1, 2, \ldots, 16\}$. La verifica del padding in fase di decifratura consiste
+nel leggere il valore dell'ultimo byte $v$ e verificare che gli ultimi $v$ byte siano tutti
+uguali a $v$. Un'implementazione errata che restituisce risposte \emph{differenziate} in
+caso di padding valido o invalido costituisce il requisito fondamentale per un Padding Oracle.
+
+% ===========================================================================
+\section{Il Padding Oracle Attack}
+% ===========================================================================
+
+\subsection{Definizione Formale di Oracle}
+
+Nella teoria della complessità computazionale, un \emph{oracolo} è un dispositivo che risponde
+a query in tempo costante. Nel contesto crittografico, un \emph{Padding Oracle} è qualsiasi
+entità — tipicamente un server — che, dato un ciphertext $C$, è in grado di comunicare
+(esplicitamente o implicitamente) se il plaintext decifrato soddisfa o meno il formato di
+padding atteso.
+
+\begin{definition}[Padding Oracle]
+Sia $D_k : \{0,1\}^* \to \{0,1\}^*$ una funzione di decifratura con padding. Un
+\emph{Padding Oracle} $\mathcal{O}$ è una funzione booleana:
+\[
+  \mathcal{O}(C) = \begin{cases} 1 & \text{se } \mathrm{unpad}(D_k(C)) \neq \bot \\ 0 & \text{altrimenti} \end{cases}
+\]
+\end{definition}
+
+L'esistenza di $\mathcal{O}$ trasforma un cifrario IND-CPA sicuro in un sistema completamente
+insicuro sotto attacchi adattativi con testo scelto (IND-CCA), come dimostrato formalmente
+da Vaudenay \cite{vaudenay2002}.
+
+\subsection{Meccanismo dell'Attacco: Decifratura Byte per Byte}
+
+L'attacco sfrutta la struttura CBC e la linearità dell'operazione XOR per recuperare il
+plaintext byte per byte, senza mai conoscere la chiave $k$.
+
+\subsubsection{Analisi di un Singolo Byte}
+
+Si consideri l'attacco sull'ultimo byte del blocco $P_i$. L'attaccante conosce $C_{i-1}$
+e $C_i$, e vuole determinare $P_i[15]$ (l'ultimo byte, con indicizzazione da 0).
+
+Per la proprietà della decifratura CBC:
+\[
+  P_i[15] = D_k(C_i)[15] \oplus C_{i-1}[15]
+\]
+
+L'attaccante costruisce un blocco modificato $C'_{i-1}$ variando solo l'ultimo byte:
+\[
+  C'_{i-1}[15] = g \quad (\text{con } g \in \{0, 1, \ldots, 255\})
+\]
+
+e interroga l'oracolo con il ciphertext $(C'_{i-1}, C_i)$. Quando $\mathcal{O}(C'_{i-1}, C_i) = 1$,
+il padding risultante è \texttt{0x01}, il che implica:
+\[
+  D_k(C_i)[15] \oplus g^* = \texttt{0x01}
+  \implies D_k(C_i)[15] = g^* \oplus \texttt{0x01}
+  \implies P_i[15] = D_k(C_i)[15] \oplus C_{i-1}[15]
+\]
+
+dove $g^*$ è il valore che ha provocato una risposta positiva dell'oracolo.
+
+\subsubsection{Generalizzazione a Tutti i Byte}
+
+Per recuperare il byte in posizione $j$ (con $j = 15, 14, \ldots, 0$), si imposta il padding
+target a $p = 16 - j$ e si aggiustano i byte già recuperati in modo che soddisfino il padding
+desiderato. Il processo richiede al più $256 \cdot 16 = 4096$ query per blocco
+(nella pratica molte meno grazie alla distribuzione uniforme dei byte di padding valido).
+
+\subsubsection{Complessità dell'Attacco}
+
+Per un messaggio di $m$ blocchi da 16 byte ($m \cdot 16 \cdot 8 = 128m$ bit totali):
+\begin{itemize}
+  \item \textbf{Query nel caso peggiore:} $255 \cdot 16 \cdot m = 4080m$
+  \item \textbf{Query attese:} $128m$ (un tentativo per byte in media con distribuzione uniforme)
+  \item \textbf{Complessità:} $O(n)$ in $n = |$plaintext$|$ — efficienza polinomiale, non esponenziale
+\end{itemize}
+
+Il contrasto con la sicurezza IND-CCA è netto: un avversario con accesso all'oracolo può
+decifrare un qualsiasi messaggio in tempo lineare nella lunghezza del ciphertext.
+
+\subsection{Variante Side-Channel: Timing Oracle}
+
+In assenza di risposte di errore esplicite, un attaccante sofisticato può sfruttare
+differenze di \emph{latenza} nel tempo di elaborazione del server. Questo scenario, noto
+come \emph{Timing Oracle}, si verifica quando:
+
+\begin{itemize}
+  \item La verifica del padding fallisce \emph{prima} rispetto a quando ha successo
+        (early exit nel codice di validazione), oppure
+  \item Un'implementazione non \emph{constant-time} introduce rami condizionali visibili
+        come differenze di latenza statisticamente significative.
+\end{itemize}
+
+La rilevazione di un Timing Oracle richiede analisi statistica delle latenze:
+si confrontano le distribuzioni dei tempi di risposta per richieste con padding valido
+versus invalido. Una distribuzione \emph{bimodale} (due picchi distinti) è la firma
+caratteristica del canale laterale temporale.
+
+\subsection{Attacchi Reali Notevoli}
+
+\begin{description}
+  \item[POODLE (2014)] \hfill \cite{poodle2014}\\
+    Vulnerabilità nel protocollo SSLv3 che sfrutta un padding oracle per decifrare
+    traffico HTTPS. Resa pubblica da Möller, Duong e Kotowicz di Google Security Team.
+  \item[Lucky Thirteen (2013)] \hfill \cite{lucky13}\\
+    Attacco timing-based contro TLS 1.0--1.2 che sfrutta differenze di latenza
+    nel codice MAC di OpenSSL, con misurazioni nell'ordine dei nanosecondi.
+  \item[BEAST (2011)] \hfill \cite{beast2011}\\
+    Attacco chosen-plaintext in CBC che sfrutta la prevedibilità dell'IV in
+    SSL/TLS 1.0 per decifrare sessioni HTTPS.
+\end{description}
+
+% ===========================================================================
+\section{Descrizione del Progetto}
+% ===========================================================================
+
+\subsection{Visione d'Insieme e Finalità}
+
+Il \emph{Padding Oracle SOC Lab} è un sistema didattico progettato per colmare il divario
+tra la teoria formale degli attacchi crittografici e la loro rilevazione operativa in un
+contesto di sicurezza realistico. A differenza dei classici laboratori che presentano
+solo l'exploit o solo la difesa, questo progetto integra entrambe le prospettive in un
+singolo ambiente coerente, consentendo di osservare l'intero ciclo di vita di un attacco:
+dalla sua esecuzione, alla sua rilevazione tramite telemetria, fino alla risposta automatica.
+
+\subsection{Architettura del Sistema}
+
+Il sistema adotta un'architettura a micro-servizi containerizzati che comunicano tramite
+uno strato di \emph{event-driven file streaming}: ogni componente produce log strutturati
+in formato JSONL (\emph{JSON Lines}) in una directory condivisa, che il motore SIEM
+consuma in modo incrementale tramite lettura con offset di byte. Questa scelta elimina la
+dipendenza da un message broker esterno, mantenendo il sistema autonomo e reproducibile.
+
+\subsubsection{Componente Victim}
+
+Il \emph{victim} è un'applicazione web Flask che espone endpoint crittografici. Il token
+ha la struttura:
+
+\[
+  \text{Token} = IV \,\|\, E_k\!\bigl(\text{pad}(\text{plaintext} \,\|\, \text{HMAC}_{k'}(\text{plaintext}))\bigr)
+\]
+
+dove $k$ è la chiave AES-128-CBC e $k'$ la chiave HMAC-SHA256, entrambe parametrizzabili
+tramite variabili d'ambiente. Il victim è configurabile in tre modalità operative:
+
+\begin{enumerate}
+  \item \textbf{Vulnerabile (\texttt{vuln})}: In caso di padding invalido, il server risponde
+        con HTTP 500 e un corpo JSON contenente il campo \texttt{"result": "padding\_error"}.
+        In caso di errore di integrità HMAC, risponde con HTTP 403 e
+        \texttt{"result": "integrity\_error"}. Questa distinzione costituisce un Padding Oracle
+        classico e diretto.
+
+  \item \textbf{Parzialmente mitigato (\texttt{partial})}: Il server applica un ritardo
+        artificiale differenziato: 30 ms per errori di padding (simulando elaborazione
+        crittografica più lenta), 5 ms per errori di integrità. Il corpo della risposta
+        è unificato (\texttt{"result": "request\_denied"}) ma il canale laterale temporale
+        rimane sfruttabile.
+
+  \item \textbf{Corretto (\texttt{fixed})}: Implementazione \emph{Encrypt-then-MAC} con
+        verifica dell'integrità prima della decifratura, ritardo costante di 15 ms
+        indipendente dal tipo di errore, e risposta unificata. Elimina sia il Padding Oracle
+        esplicito sia il Timing Oracle.
+\end{enumerate}
+
+\subsubsection{Componente Attacker}
+
+Lo script di attacco implementa l'algoritmo Padding Oracle descritto nella
+Sezione~\ref{sec:meccanismo} in Python. Opera iterando sui blocchi del ciphertext da destra
+a sinistra, interrogando sistematicamente l'endpoint \texttt{/decrypt} del victim con
+variazioni del blocco $C_{i-1}$. Ogni query viene annotata con metadati (IP sorgente,
+timestamp, lunghezza del ciphertext, byte target) e trasmessa al SOC tramite log JSONL.
+
+\subsubsection{Componente Benign Client}
+
+Il client benigno simula traffico legittimo multi-IP con pattern di accesso variabile
+(burst casuale, rate stazionario). Il suo scopo è fornire una \emph{baseline} realistica
+al motore di detection, consentendo di misurare il tasso di falsi positivi quando le
+regole di rilevamento operano in presenza di traffico normale.
+
+\subsubsection{Componente SOC Collector e Dashboard}
+
+Il motore SOC è l'elemento centrale del sistema di difesa. Aggrega gli eventi JSONL
+da tutti i componenti, li persiste in un database SQLite con modalità WAL
+(\emph{Write-Ahead Logging}) per ottimizzare le letture concorrenti, e applica le regole
+di detection descritte nella Sezione~\ref{sec:siem}. La dashboard web offre visualizzazione
+in tempo reale della topologia di rete, degli alert attivi, delle metriche KPI e delle
+configurazioni WAF, utilizzando la libreria \texttt{vis-network.js} per il grafo.
+
+\subsection{Infrastruttura e Deploy}
+
+Il sistema è orchestrato tramite Docker Compose su una rete bridge isolata. I servizi
+espongono le seguenti porte sull'host:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Servizio} & \textbf{Porta Host} & \textbf{Funzione} \\
+\midrule
+\texttt{victim}    & 18080 & API crittografiche (target dell'attacco) \\
+\texttt{soc}       & 18090 & API REST SIEM (\texttt{/alerts}, \texttt{/metrics}) \\
+\texttt{soc-ui}    & 18091 & Dashboard web interattiva \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ===========================================================================
+\section{SIEM: Architettura e Regole di Rilevamento}
+\label{sec:siem}
+% ===========================================================================
+
+\subsection{Fondamenti di SIEM e SOC}
+
+Un sistema SIEM (\emph{Security Information and Event Management}) ha il compito di
+raccogliere, normalizzare, correlare e analizzare log di sicurezza provenienti da sorgenti
+eterogenee, al fine di rilevare anomalie e generare alert azionabili. La sua efficacia
+è misurata attraverso metriche formali standard:
+
+\begin{description}
+  \item[\textbf{TPR} (True Positive Rate):] Frazione di attacchi reali correttamente rilevati.
+        $\text{TPR} = \frac{TP}{TP + FN}$
+  \item[\textbf{FPR} (False Positive Rate):] Frazione di eventi benigni erroneamente classificati
+        come malevoli. $\text{FPR} = \frac{FP}{FP + TN}$
+  \item[\textbf{MTTD} (Mean Time to Detect):] Tempo medio tra l'inizio di un attacco e la
+        generazione del primo alert. Misura la reattività del sistema.
+\end{description}
+
+\subsection{Pipeline di Ingestion e Correlazione}
+
+La pipeline del SOC si articola in tre fasi:
+
+\begin{enumerate}
+  \item \textbf{Ingestion incrementale:} Il modulo \texttt{collector.py} legge i file JSONL
+        con un meccanismo a offset di byte (\emph{tail-like}), garantendo che nessun evento
+        venga processato due volte. I nuovi eventi vengono inseriti nel database SQLite tramite
+        una transazione atomica con lock dedicato.
+
+  \item \textbf{Normalizzazione:} Ogni evento viene normalizzato verso uno schema comune
+        che include: \texttt{event\_id}, \texttt{timestamp} (ISO 8601), \texttt{src\_ip},
+        \texttt{endpoint}, \texttt{status\_code}, \texttt{latency\_ms},
+        \texttt{crypto\_time\_ns}, \texttt{error\_type} e \texttt{mode}.
+
+  \item \textbf{Correlazione statistica:} Il motore applica regole basate su aggregazioni
+        per IP sorgente su finestre temporali configurabili (\emph{sliding window}).
+\end{enumerate}
+
+\subsection{Regole di Rilevamento}
+
+Il sistema implementa tre regole principali, ciascuna associata a una tecnica del framework
+MITRE ATT\&CK:
+
+\subsubsection{Regola 1 — Error Flooding (T1110.001)}
+
+Questa regola identifica il Padding Oracle classico nella modalità \texttt{vuln}, dove
+le risposte differenziate sono esplicite. Il trigger si attiva quando:
+
+\[
+  N_{IP} \geq \tau_{min} \quad \land \quad
+  \frac{\#\{\text{errori}\}}{N_{IP}} \geq \tau_{fail} \quad \land \quad
+  \#\{\text{padding\_error}\} > 0
+\]
+
+con soglie di default $\tau_{min} = 25$ eventi e $\tau_{fail} = 0.85$.
+La presenza di almeno un evento \texttt{padding\_error} (HTTP 500) è il discriminatore
+che distingue questa regola da un generico errore applicativo.
+
+\subsubsection{Regola 2 — Timing Side-Channel (T1595.002)}
+
+Questa regola rileva il Timing Oracle nella modalità \texttt{partial} attraverso
+l'analisi della distribuzione delle latenze. Il detector calcola il
+\emph{coefficiente di bimodalità di Sarle} (BC), una misura statistica che quantifica
+quanto una distribuzione si discosta dalla normalità verso due picchi distinti:
+
+\[
+  BC = \frac{\hat{\gamma}_1^2 + 1}{\hat{\kappa} + \frac{3(n-1)^2}{(n-2)(n-3)}}
+\]
+
+dove $\hat{\gamma}_1$ è il coefficiente di asimmetria campionario e $\hat{\kappa}$
+la curtosi di Pearson. Per una distribuzione normale, $BC \approx 0.333$; una
+distribuzione bimodale produce $BC > 0.555$, che costituisce la soglia di alert.
+
+Il trigger si attiva quando almeno una delle seguenti condizioni è soddisfatta
+(con $n \geq 20$ campioni):
+\begin{itemize}
+  \item $\sigma_{latency} \geq 6.0\,\text{ms}$
+  \item $P_{95} - P_{50} \geq 12.0\,\text{ms}$
+  \item $BC \geq 0.555$
+\end{itemize}
+
+\subsubsection{Regola 3 — Block Probing Signature (T1040)}
+
+Questa regola riconosce il pattern strutturale dell'exploit: l'attaccante invia
+sequenze di richieste con ciphertext della \emph{stessa lunghezza} (multiplo di 16,
+cioè allineata al blocco AES) ma con contenuto sistematicamente variato. Il trigger è:
+
+\[
+  \#\{\text{errori}\} \geq \tau_{consec} \quad \land \quad
+  \text{fail\_rate} \geq 0.70 \quad \land \quad
+  |\mathcal{L}| = 1 \quad \land \quad
+  \ell_0 \equiv 0 \pmod{16}
+\]
+
+dove $\mathcal{L}$ è l'insieme delle lunghezze di ciphertext osservate, $\ell_0$
+l'unica lunghezza presente, e $\tau_{consec} = 15$ il numero minimo di errori
+consecutivi.
+
+\subsection{WAF Inline e Risposta Automatica (SOAR)}
+
+Il sistema integra un \emph{Web Application Firewall} inline implementato direttamente
+nel victim, che valuta ogni richiesta in ingresso rispetto a una policy di sliding-window
+per IP sorgente. Due regole principali sono pre-configurate:
+
+\begin{description}
+  \item[WAF-01 (Error Flooding \& High Fail-Rate Ban):] Blocca l'IP quando il fail-rate
+        supera l'80\% con almeno 15 richieste in finestra di 60 secondi. Ban TTL: 120 s.
+  \item[WAF-02 (Consecutive CBC Byte-Probing):] Blocca l'IP dopo 8 errori crittografici
+        consecutivi in 60 secondi. Ban TTL: 180 s.
+\end{description}
+
+Il componente SOAR (\emph{Security Orchestration, Automation and Response}) consente
+al SIEM di richiedere automaticamente il blocco dell'IP malevolo sul WAF del victim
+tramite una chiamata REST asincrona, chiudendo il ciclo di risposta senza intervento
+umano.
+
+\subsection{Generazione di Regole Sigma}
+
+Il sistema è in grado di esportare automaticamente le regole di detection nel formato
+Sigma \cite{sigma}, uno standard aperto per la scrittura di regole SIEM indipendenti
+dalla piattaforma. Le regole generate includono i metadati MITRE ATT\&CK, le condizioni
+di trigger e i campi di evidenza, e sono pronte per essere importate in piattaforme
+come Splunk, Elasticsearch o Microsoft Sentinel.
+
+% ===========================================================================
+\section{Sezione Pratica: Esecuzione e Verifica}
+% ===========================================================================
+
+Questa sezione, unica parte operativa del documento, riporta i comandi necessari per
+avviare il laboratorio, riprodurre l'attacco e verificare il funzionamento del SIEM.
+Per i dettagli implementativi si rimanda al codice sorgente.
+
+\begin{lstlisting}[language=bash, caption={Avvio completo del laboratorio e riproduzione dell'attacco}]
+# 1. Avvio dello stack completo (victim in modalita' vuln, soc, soc-ui)
+./control/scenario.sh up
+
+# 2. Verifica che tutti i servizi siano operativi
+curl http://localhost:18080/health   # victim
+curl http://localhost:18090/health   # soc collector
+# Aprire http://localhost:18091 nel browser per la dashboard
+
+# 3. Avvio del traffico benigno (necessario per costruire la baseline SIEM)
+./control/scenario.sh start-benign
+
+# 4. Esecuzione dell'attacco Padding Oracle contro il victim vulnerabile
+./control/scenario.sh run-attack
+# oppure direttamente:
+python attacker/attack.py --target http://localhost:18080
+
+# 5. Abilitare le regole SIEM e osservare gli alert generati
+curl -X POST http://localhost:18090/alerts/rules \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
+curl http://localhost:18090/alerts   # visualizza alert attivi
+
+# 6. Passare alla modalita' timing side-channel e ripetere
+./control/scenario.sh up-partial
+./control/scenario.sh run-attack
+
+# 7. Verificare che la modalita' fixed blocchi l'attacco
+./control/scenario.sh up-fixed
+./control/scenario.sh run-attack    # deve fallire il recupero del plaintext
+
+# 8. Eseguire la suite di test completa
+pytest tests/ -v
+\end{lstlisting}
+
+% ===========================================================================
+\section{Conclusioni}
+% ===========================================================================
+
+Il \emph{Padding Oracle SOC Lab} costituisce un caso di studio completo che abbraccia
+tre dimensioni complementari della sicurezza informatica: la \emph{crittografia applicata}
+(AES-CBC, PKCS\#7, HMAC), la \emph{sicurezza offensiva} (exploit padding oracle e
+timing side-channel) e la \emph{sicurezza difensiva} (detection statistica, WAF, SOAR).
+
+La scelta di implementare tre modalità operative del victim non è casuale: riflette
+la progressione naturale delle mitigazioni osservata storicamente nell'industria,
+da sistemi completamente vulnerabili a soluzioni parziali (che eliminano il canale
+esplicito ma espongono quello temporale) fino alla correzione architetturale corretta
+(\emph{Encrypt-then-MAC} con costant-time comparison).
+
+Il motore SIEM dimostra che è possibile rilevare entrambe le varianti dell'attacco
+— esplicita e temporale — attraverso metriche statisticamente fondate (bimodality
+coefficient, standard deviation, fail rate), senza richiedere firme statiche o
+pattern di payload, e quindi resistenti a variazioni superficiali dell'exploit.
+
+% ===========================================================================
+% Riferimenti
+% ===========================================================================
+\begin{thebibliography}{99}
+
+\bibitem{vaudenay2002}
+  S.~Vaudenay,
+  ``Security Flaws Induced by CBC Padding — Applications to SSL, IPSEC, WTLS...'',
+  in \textit{Advances in Cryptology — EUROCRYPT 2002},
+  Lecture Notes in Computer Science, vol.~2332, Springer, 2002.
+
+\bibitem{nist-aes}
+  National Institute of Standards and Technology,
+  \textit{FIPS PUB 197: Advanced Encryption Standard (AES)},
+  Federal Information Processing Standards Publication, 2001.
+
+\bibitem{nist-sp800-38a}
+  M.~Dworkin,
+  \textit{NIST Special Publication 800-38A: Recommendation for Block Cipher Modes of Operation},
+  National Institute of Standards and Technology, 2001.
+
+\bibitem{pkcs7}
+  B.~Kaliski,
+  \textit{RFC 2315: PKCS \#7: Cryptographic Message Syntax Version 1.5},
+  Internet Engineering Task Force, 1998.
+
+\bibitem{poodle2014}
+  B.~Möller, T.~Duong, K.~Kotowicz,
+  ``This POODLE Bites: Exploiting The SSL 3.0 Fallback'',
+  Google Security Advisory, settembre 2014.
+
+\bibitem{lucky13}
+  N.~J.~Al~Fardan, K.~G.~Paterson,
+  ``Lucky Thirteen: Breaking the TLS and DTLS Record Protocols'',
+  in \textit{IEEE Symposium on Security and Privacy}, 2013.
+
+\bibitem{beast2011}
+  J.~Rizzo, T.~Duong,
+  ``Here Come the XOR Ninjas'',
+  ekoparty Security Conference, 2011.
+
+\bibitem{sigma}
+  T.~Patzke et al.,
+  ``Sigma: Generic Signature Format for SIEM Systems'',
+  \url{https://github.com/SigmaHQ/sigma}, 2017.
+
+\end{thebibliography}
+
+\vfill
+\begin{center}
+\small\textit{Generato da \texttt{/project-brief} — commit \texttt{80982df} — branch \texttt{master} — 2026-09-07}
+\end{center}
+
+\end{document}

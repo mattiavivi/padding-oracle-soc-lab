@@ -46,6 +46,18 @@ class TestSiemQuery(unittest.TestCase):
         self.assertEqual(attacker_summary["total_requests"], 2)
         self.assertEqual(attacker_summary["padding_errors"], 1)
 
+    def test_group_by_and_having_clause(self):
+        q = "endpoint = /decrypt | GROUP BY src_ip | HAVING COUNT(*) >= 2 AND FAIL_RATE > 0.50"
+        result = filter_and_aggregate_events(self.sample_events, q)
+        self.assertEqual(result["group_by"], "src_ip")
+        
+        matched_summaries = [s for s in result["ip_summaries"] if s["matches_aggregation"]]
+        self.assertEqual(len(matched_summaries), 1)
+        self.assertEqual(matched_summaries[0]["key"], "attacker")
+        self.assertEqual(matched_summaries[0]["total_requests"], 3)
+        self.assertGreater(matched_summaries[0]["fail_rate"], 0.50)
+
 
 if __name__ == "__main__":
     unittest.main()
+

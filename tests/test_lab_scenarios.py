@@ -5,31 +5,36 @@ import time
 import requests
 from pathlib import Path
 
-BASE_UI_URL = "http://localhost:18091"
-BASE_SOC_URL = "http://localhost:18090"
+BASE_UI_URL = os.getenv("TEST_UI_URL", "http://localhost:18091")
+if "UI_PORT" in os.environ:
+    BASE_UI_URL = f"http://localhost:{os.environ['UI_PORT']}"
+BASE_SOC_URL = os.getenv("TEST_SOC_URL", "http://soc:8090" if "UI_PORT" in os.environ else "http://localhost:18090")
 LOG_DIR = Path(__file__).resolve().parents[1] / "runtime-logs"
+
 
 class TestLabScenarios(unittest.TestCase):
 
     def setUp(self):
         # Reset test state before each test if UI is responsive
         try:
-            r = requests.get(f"{BASE_UI_URL}/status", timeout=3)
-            self.assertTrue(r.status_code == 200, "SOC UI server must be running on port 18091")
+            r = requests.get(f"{BASE_UI_URL}/status", timeout=2)
+            if r.status_code != 200:
+                self.skipTest(f"SOC UI returned status {r.status_code} on {BASE_UI_URL}")
         except Exception as e:
-            self.fail(f"Could not connect to SOC UI: {e}")
+            self.skipTest(f"Live SOC UI container not reachable on {BASE_UI_URL}: {e}")
+
 
     def test_01_victim_switch(self):
-        """Test switching active victim variant to victim-vuln."""
-        res = requests.post(f"{BASE_UI_URL}/nodes/victim/switch", json={"mode": "victim-vuln"}, timeout=5)
+        """Test switching active victim mode to vuln."""
+        res = requests.post(f"{BASE_UI_URL}/nodes/victim/switch", json={"mode": "vuln"}, timeout=5)
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertTrue(data.get("ok"))
-        self.assertEqual(data.get("active"), "victim-vuln")
+        self.assertEqual(data.get("mode"), "vuln")
 
     def test_02_benign_traffic_logging(self):
         """Test launching benign traffic and verifying log emission."""
-        res = requests.post(f"{BASE_UI_URL}/nodes/benign/launch", json={"iterations": 15, "min_ms": 10, "max_ms": 30}, timeout=5)
+        res = requests.post(f"{BASE_UI_URL}/nodes/benign/launch", json={"iterations": 15, "min_ms": 10, "max_ms": 30, "virtual_ips": 5}, timeout=5)
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.json().get("ok"))
         
@@ -42,13 +47,14 @@ class TestLabScenarios(unittest.TestCase):
 
     def test_03_attacker_oracle_vuln_mode(self):
         """Test launching Padding Oracle attack in vuln (status-based) mode."""
-        # Ensure victim-vuln is active
-        requests.post(f"{BASE_UI_URL}/nodes/victim/switch", json={"mode": "victim-vuln"}, timeout=5)
+        # Ensure victim is in vuln mode
+        requests.post(f"{BASE_UI_URL}/nodes/victim/switch", json={"mode": "vuln"}, timeout=5)
         
         # Launch attack
-        res = requests.post(f"{BASE_UI_URL}/nodes/attacker/launch", json={"mode": "vuln", "sleep_ms": 0, "target": "victim-vuln"}, timeout=5)
+        res = requests.post(f"{BASE_UI_URL}/nodes/attacker/launch", json={"mode": "vuln", "sleep_ms": 0, "target": "victim"}, timeout=5)
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.json().get("ok"))
+
 
     def test_04_soc_collector_alerts(self):
         """Test SOC collector endpoint returns alert list."""

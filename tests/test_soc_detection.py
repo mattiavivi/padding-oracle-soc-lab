@@ -143,6 +143,40 @@ class TestSocDetectionEngine(unittest.TestCase):
         self.assertIsNotNone(kpis["mttd_seconds"])
         self.assertEqual(kpis["mttd_seconds"], 8.0)
 
+    def test_custom_siem_rule_with_bimodality(self):
+        now = datetime.now(timezone.utc)
+        events = []
+        for i in range(25):
+            lat = 35.0 if i in (5, 18) else 5.0
+            events.append({
+                "ts": (now - timedelta(seconds=25 - i)).isoformat(),
+                "service": "victim",
+                "endpoint": "/decrypt",
+                "src_ip": "198.51.100.42",
+                "status_code": 403,
+                "error_type": "forbidden",
+                "ciphertext_len": 48,
+                "latency_ms": lat,
+            })
+
+        custom_rules = {
+            "enabled": True,
+            "rules": [
+                {
+                    "id": "custom_bimodal_probe",
+                    "name": "Custom Bimodal Timing Rule",
+                    "enabled": True,
+                    "min_events": 10,
+                    "bimodality": 0.25,
+                    "fail_rate": 0.0,
+                    "timing_stddev": 0.0,
+                }
+            ]
+        }
+        alerts = _build_alerts(events, custom_rules=custom_rules)
+        self.assertTrue(any(a["rule"] == "custom_bimodal_probe" for a in alerts))
+        self.assertTrue(any(a.get("evidence", {}).get("bimodality_coefficient", 0) >= 0.25 for a in alerts))
+
 
 if __name__ == "__main__":
     unittest.main()

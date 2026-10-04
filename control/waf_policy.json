@@ -4,5 +4,44 @@
   "max_fail_rate": 0.8,
   "max_consecutive_errors": 12,
   "window_seconds": 60,
-  "action": "429_too_many_requests"
+  "ban_ttl_seconds": 120,
+  "action": "429_too_many_requests",
+  "rules": [
+    {
+      "id": "waf_rate_limit_flooding",
+      "name": "WAF-01: Padding Error Flooding & High Fail-Rate Ban",
+      "description": "Blocca IP quando il fail-rate supera la soglia con burst di richieste",
+      "endpoint": "/decrypt",
+      "enabled": true,
+      "min_requests_window": 15,
+      "max_fail_rate": 0.8,
+      "max_consecutive_errors": 12,
+      "window_seconds": 60,
+      "ban_ttl_seconds": 120
+    },
+    {
+      "id": "waf_consecutive_probing",
+      "name": "WAF-02: Consecutive CBC Byte-Probing Mitigation",
+      "description": "Blocca IP immediatamente dopo una sequenza ininterrotta di errori crittografici",
+      "endpoint": "/decrypt",
+      "enabled": true,
+      "min_requests_window": 8,
+      "max_fail_rate": 0.9,
+      "max_consecutive_errors": 8,
+      "window_seconds": 60,
+      "ban_ttl_seconds": 180
+    },
+    {
+      "id": "waf_login_bruteforce_defense",
+      "name": "WAF-03: Login Brute-Force & Credential Spraying Shield",
+      "description": "Blocca tentativi ripetuti di autenticazione fallita (HTTP 401)",
+      "endpoint": "/api/v1/auth/login",
+      "enabled": true,
+      "min_requests_window": 5,
+      "max_fail_rate": 0.8,
+      "max_consecutive_errors": 5,
+      "window_seconds": 60,
+      "ban_ttl_seconds": 120
+    }
+  ]
 }

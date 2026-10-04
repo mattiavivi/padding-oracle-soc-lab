@@ -1,3 +1,13 @@
-runtime-logs/
+runtime-logs/*
+!runtime-logs/.gitkeep
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+node_modules/
+
+# Internal project notes; kept locally but not published
+RULES.md
+docs/ideas/
+docs/plans/
+docs/tasks/

